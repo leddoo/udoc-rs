@@ -1,36 +1,63 @@
 
+#[derive(Clone)]
 struct Reader<'buf, T> {
-    buffer: &'buf [T],
-    cursor: usize,
+    pub buffer: &'buf [T],
+    pub cursor: usize,
 }
 
 impl<'rdr, T> Reader<'rdr, T> {
-    fn new(buffer: &'rdr [T]) -> Reader<'rdr, T> {
+    pub fn new(buffer: &'rdr [T]) -> Reader<'rdr, T> {
         Reader { buffer: buffer, cursor: 0 }
     }
 
-    fn peek(&self, offset: usize) -> Option<&T> {
+    pub fn peek(&self, offset: usize) -> Option<&'rdr T> {
         self.buffer.get(self.cursor + offset)
     }
 
-    fn next(&mut self) -> Option<&T> {
+    pub fn empty(&self) -> bool {
+        !self.has_some()
+    }
+
+    pub fn has_some(&self) -> bool {
+        self.cursor < self.buffer.len()
+    }
+
+    pub fn next(&mut self) -> Option<&'rdr T> {
         self.buffer.get(self.cursor).map(|result| {
             self.cursor += 1;
             result
         })
     }
 
-    fn has_n(&mut self, n: usize) -> bool {
+    pub fn has_n(&self, n: usize) -> bool {
         self.cursor + n <= self.buffer.len()
+    }
+
+    pub fn peek_next_n(&self, n: usize) -> Option<&'rdr [T]> {
+        if self.has_n(n) {
+            return Some(&self.buffer[self.cursor .. self.cursor + n]);
+        }
+        None
+    }
+
+    pub fn next_n(&mut self, n: usize) -> Option<&'rdr [T]> {
+        self.peek_next_n(n).map(|result| {
+            self.cursor += n;
+            result
+        })
+    }
+
+    pub fn rest(&self) -> &[T] {
+        &self.buffer[self.cursor..]
     }
 }
 
 impl<'rdr> Reader<'rdr, u8> {
-    fn next_u8(&mut self) -> Option<u8> {
+    pub fn next_u8(&mut self) -> Option<u8> {
         self.next().map(|result| *result)
     }
 
-    fn next_u16_le(&mut self) -> Option<u16> {
+    pub fn next_u16_le(&mut self) -> Option<u16> {
         if self.has_n(2) {
             let bytes = unsafe {[
                 *self.buffer.get_unchecked(self.cursor + 0),
@@ -42,7 +69,7 @@ impl<'rdr> Reader<'rdr, u8> {
         None
     }
 
-    fn next_u32_le(&mut self) -> Option<u32> {
+    pub fn next_u32_le(&mut self) -> Option<u32> {
         if self.has_n(4) {
             let bytes = unsafe {[
                 *self.buffer.get_unchecked(self.cursor + 0),
@@ -56,7 +83,7 @@ impl<'rdr> Reader<'rdr, u8> {
         None
     }
 
-    fn next_u64_le(&mut self) -> Option<u64> {
+    pub fn next_u64_le(&mut self) -> Option<u64> {
         if self.has_n(8) {
             let bytes = unsafe {[
                 *self.buffer.get_unchecked(self.cursor + 0),
@@ -128,19 +155,23 @@ fn encode_size(value: u64) -> ([u8; 8], usize) {
 }
 
 #[inline(always)]
-fn decode_size(bytes: &[u8]) -> Option<(u64, usize)> {
-    let mut bytes = Reader::new(bytes);
-    if let Some(first) = bytes.peek(0) {
-        let value = match first & 0b11 {
-            0b00 => bytes.next_u8().map(|value| value as u64),
-            0b01 => bytes.next_u16_le().map(|value| value as u64),
-            0b10 => bytes.next_u32_le().map(|value| value as u64),
-            0b11 => bytes.next_u64_le(),
-            _    => unreachable!()
-        };
-        return value.map(|value| (value >> 2, bytes.cursor));
-    }
-    None
+fn decode_size(reader: &mut Reader<u8>) -> Result<u64, ()> {
+    let first = reader.peek(0).ok_or(())?;
+    let value = match first & 0b11 {
+        0b00 => reader.next_u8().ok_or(())? as u64,
+        0b01 => reader.next_u16_le().ok_or(())? as u64,
+        0b10 => reader.next_u32_le().ok_or(())? as u64,
+        0b11 => reader.next_u64_le().ok_or(())?,
+        _    => unreachable!()
+    };
+    Ok(value >> 2)
+}
+
+fn peek_decode_size(reader: &Reader<u8>) -> Result<(u64, usize), ()> {
+    let mut reader = reader.clone();
+    let old_cursor = reader.cursor;
+    let size = decode_size(&mut reader)?;
+    Ok((size, reader.cursor - old_cursor))
 }
 
 
@@ -157,24 +188,21 @@ fn encode_symbol_length(value: u64) -> ([u8; 8], usize) {
 }
 
 #[inline(always)]
-fn decode_symbol_length(bytes: &[u8]) -> Option<(u64, usize)> {
-    if let Some(first) = bytes.get(0) {
-        let is_inline = first & 0b10 == 0;
-        if !is_inline {
-            return None;
-        }
+fn decode_symbol_length(reader: &mut Reader<u8>) -> Result<u64, ()> {
+    let first = *reader.peek(0).ok_or(())?;
 
-        let length = 1 << (first & 0b01);
-
-        if bytes.len() >= length {
-            let mut value = [0; 8];
-            value[..length].copy_from_slice(&bytes[..length]);
-
-            let value = u64::from_le_bytes(value) >> 2;
-            return Some((value, length));
-        }
+    let is_inline = first & 0b10 == 0;
+    if is_inline {
+        let value = match first & 0b01 {
+            0b00 => reader.next_u8().ok_or(())?     as u64,
+            0b01 => reader.next_u16_le().ok_or(())? as u64,
+            _ => unreachable!(),
+        };
+        Ok(value >> 2)
     }
-    None
+    else {
+        unimplemented!()
+    }
 }
 
 
@@ -259,14 +287,13 @@ impl Encoder {
         let size = self.sizers.last().unwrap().size;
         let mut string = Vec::with_capacity(size);
 
-        let mut buffer  = &self.buffer[..];
-        let mut offsets = &self.size_offsets[..];
+        let mut buffer  = Reader::new(&self.buffer);
+        let mut offsets = Reader::new(&self.size_offsets);
         let mut first = true;
 
-        while buffer.len() > 0 {
-            if offsets.len() > 0 {
-                let (next_size, length) = decode_size(offsets).unwrap();
-                offsets = &offsets[length..];
+        while buffer.has_some() {
+            if offsets.has_some() {
+                let next_size = decode_size(&mut offsets).unwrap();
 
                 let mut next_size = next_size as usize;
                 if first {
@@ -279,15 +306,14 @@ impl Encoder {
                     next_size -= 8;
                 }
 
-                string.extend(&buffer[..next_size]);
-                buffer = &buffer[next_size..];
+                string.extend(buffer.next_n(next_size).unwrap());
 
-                let (_size, length) = decode_size(buffer).unwrap();
-                string.extend(&buffer[..length]);
-                buffer = &buffer[8..];
+                let (_size, length) = peek_decode_size(&buffer).unwrap();
+                string.extend(buffer.peek_next_n(length).unwrap());
+                buffer.next_n(8).unwrap();
             }
             else {
-                string.extend(buffer);
+                string.extend(buffer.rest());
                 break;
             }
         }
@@ -297,6 +323,76 @@ impl Encoder {
     }
 }
 
+
+#[allow(dead_code)]
+struct DecodedValue<'val> {
+    ty: WireType,
+    has_schema_type: bool,
+    has_tags: bool,
+
+    schema_type: &'val [u8],
+    tags: &'val [u8],
+    payload: &'val [u8],
+}
+
+fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()> {
+    let header = reader.next_u8().ok_or(())?;
+
+    let ty: WireType = {
+        let ty = header & WIRE_TYPE_MASK;
+        if !(ty >= WIRE_TYPE_MIN && ty <= WIRE_TYPE_MAX) {
+            return Err(());
+        }
+        unsafe { std::mem::transmute(ty) }
+    };
+
+    let has_schema_type = header & WIRE_FLAG_SCHEMA_TYPE != 0;
+    let has_tags        = header & WIRE_FLAG_TAGS != 0;
+
+    let mut result = DecodedValue {
+        ty, has_schema_type, has_tags,
+        schema_type: &reader.buffer[0..0],
+        tags:        &reader.buffer[0..0],
+        payload:     &reader.buffer[0..0],
+    };
+
+    if has_schema_type {
+        unimplemented!();
+    }
+
+    if has_tags {
+        let size = decode_size(reader)? as usize;
+        result.tags = reader.next_n(size).ok_or(())?;
+    }
+
+    use WireType::*;
+    result.payload = match ty {
+        Null | BoolFalse | BoolTrue => {
+            &reader.buffer[0..0]
+        },
+        Nat8 | Int8 => {
+            reader.next_n(1).ok_or(())?
+        },
+        Nat16 | Int16 => {
+            reader.next_n(2).ok_or(())?
+        },
+        Nat32 | Int32 | Float32 | Decimal32 => {
+            reader.next_n(4).ok_or(())?
+        },
+        Nat64 | Int64 | Float64 | Decimal64 => {
+            reader.next_n(8).ok_or(())?
+        },
+        Nat | Int | Bytes | String | List => {
+            let size = decode_size(reader)? as usize;
+            reader.next_n(size).ok_or(())?
+        },
+        Symbol => {
+            unimplemented!()
+        },
+    };
+
+    Ok(result)
+}
 
 
 
@@ -367,79 +463,34 @@ fn _encode_json(encoder: &mut Encoder, value: &Value) {
 
 
 fn decode_json(buffer: &[u8]) -> Result<Value, ()> {
-    let (value, length) = _decode_json(buffer)?;
-    if length != buffer.len() {
+    let mut reader = Reader::new(buffer);
+    let value = _decode_json(&mut reader)?;
+    if reader.has_some() {
         return Err(());
     }
     Ok(value)
 }
 
-fn _decode_json(mut buffer: &[u8]) -> Result<(Value, usize), ()> {
-    let initial_length = buffer.len();
-
-    if buffer.len() < 1 {
-        return Err(());
-    }
-
-    let ty = *buffer.get(0).ok_or(())?;
-    buffer = &buffer[1..];
-
-    let flags = ty;
-
-    let ty = ty & WIRE_TYPE_MASK;
-    if !(ty >= WIRE_TYPE_MIN && ty <= WIRE_TYPE_MAX) {
-        return Err(());
-    }
-
-    let ty: WireType = unsafe { std::mem::transmute(ty) };
-
-    let has_schema_type = flags & WIRE_FLAG_SCHEMA_TYPE != 0;
-    let has_tags        = flags & WIRE_FLAG_TAGS != 0;
-
-    if has_schema_type {
-        unimplemented!();
-    }
-
-    let mut tags = &buffer[0..0];
-    if has_tags {
-        let (size, length) = decode_size(buffer).ok_or(())?;
-        let size = size as usize;
-        buffer = &buffer[length..];
-
-        if buffer.len() < size {
-            return Err(());
-        }
-        tags   = &buffer[..size];
-        buffer = &buffer[size..];
-    }
+fn _decode_json(reader: &mut Reader<u8>) -> Result<Value, ()> {
+    let value = decode(reader)?;
 
     use WireType::*;
-    let result = match ty {
+    let result = match value.ty {
         Null => {
-            if has_tags {
+            if value.has_tags {
                 let mut map = serde_json::Map::new();
 
-                if tags.len() > 0 {
-                    let (count, len) = decode_size(tags).ok_or(())?;
-                    let count = count as usize;
-                    tags = &tags[len..];
+                if value.tags.len() > 0 {
+                    let mut tags = Reader::new(&value.tags);
 
+                    let count = decode_size(&mut tags)? as usize;
                     for _ in 0..count {
-                        let (size, len) = decode_symbol_length(tags).ok_or(())?;
-                        let size = size as usize;
-                        tags = &tags[len..];
-                        if tags.len() < size {
-                            return Err(());
-                        }
+                        let symbol_size = decode_symbol_length(&mut tags)? as usize;
 
-                        let symbol = Vec::from(&tags[..size]);
-                        tags = &tags[size..];
-
+                        let symbol = Vec::from(tags.next_n(symbol_size).ok_or(())?);
                         let symbol = std::string::String::from_utf8(symbol).ok().ok_or(())?;
 
-                        let (value, len) = _decode_json(tags)?;
-                        tags = &tags[len..];
-
+                        let value = _decode_json(&mut tags)?;
                         map.insert(symbol, value);
                     }
                 }
@@ -455,15 +506,11 @@ fn _decode_json(mut buffer: &[u8]) -> Result<(Value, usize), ()> {
         BoolTrue  => { Value::Bool(true) },
 
         Float64 => {
-            if buffer.len() < 8 {
-                return Err(());
-            }
-
-            let mut bytes = [0; 8];
-            bytes.copy_from_slice(&buffer[..8]);
-            buffer = &buffer[8..];
-
-            let value = f64::from_le_bytes(bytes);
+            let value = {
+                let mut bytes = [0; 8];
+                bytes.copy_from_slice(value.payload);
+                f64::from_le_bytes(bytes)
+            };
 
             // temp
             let number =
@@ -483,41 +530,22 @@ fn _decode_json(mut buffer: &[u8]) -> Result<(Value, usize), ()> {
         },
 
         String => {
-            let (size, len) = decode_size(buffer).ok_or(())?;
-            let size = size as usize;
-            buffer = &buffer[len..];
-            if buffer.len() < size {
-                return Err(());
-            }
-
-            let bytes = &buffer[..size];
-            buffer = &buffer[size..];
-
-            let string = bytes.to_vec();
+            let string = value.payload.to_vec();
             let string = std::string::String::from_utf8(string).ok().ok_or(())?;
             Value::String(string)
         },
 
         List => {
-            let (size, len) = decode_size(buffer).ok_or(())?;
-            let size = size as usize;
-            buffer = &buffer[len..];
-            if buffer.len() < size {
-                return Err(());
-            }
+            let mut payload = Reader::new(&value.payload);
 
             let mut values = vec![];
-            if size > 0 {
-                let (length, len) = decode_size(buffer).ok_or(())?;
-                let length = length as usize;
-                buffer = &buffer[len..];
-
+            if payload.has_some() {
+                let length = decode_size(&mut payload)? as usize;
                 values.reserve(length);
                 for _ in 0..length {
-                    let (value, len) = _decode_json(buffer)?;
-                    buffer = &buffer[len..];
-                    values.push(value);
+                    values.push(_decode_json(&mut payload)?);
                 }
+                assert!(payload.empty());
             }
 
             Value::Array(values)
@@ -533,8 +561,7 @@ fn _decode_json(mut buffer: &[u8]) -> Result<(Value, usize), ()> {
         },
     };
 
-    let final_length = buffer.len();
-    Ok((result, initial_length - final_length))
+    Ok(result)
 }
 
 
