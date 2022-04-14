@@ -5,6 +5,7 @@ struct Reader<'buf, T> {
     pub cursor: usize,
 }
 
+#[allow(dead_code)]
 impl<'rdr, T> Reader<'rdr, T> {
     pub fn new(buffer: &'rdr [T]) -> Reader<'rdr, T> {
         Reader { buffer: buffer, cursor: 0 }
@@ -117,7 +118,6 @@ const WIRE_FLAG_TAGS:        u8 = 0x80;
 
 
 
-// value: Nat62
 fn encode_size(value: u64) -> ([u8; 8], usize) {
     let bits = 64 - value.leading_zeros();
 
@@ -149,37 +149,6 @@ fn peek_decode_size(reader: &Reader<u8>) -> Option<(u64, usize)> {
     let old_cursor = reader.cursor;
     let size = decode_size(&mut reader)?;
     Some((size, reader.cursor - old_cursor))
-}
-
-
-// value: Nat14
-fn encode_symbol_length(value: u64) -> ([u8; 8], usize) {
-    let bits = 64 - value.leading_zeros();
-
-    let value = value << 2;
-    let (value, length) =
-        if bits < 6 { (value | 0b00, 1) }
-        else        { (value | 0b01, 2) };
-
-    (value.to_le_bytes(), length)
-}
-
-#[inline(always)]
-fn decode_symbol_length(reader: &mut Reader<u8>) -> Option<u64> {
-    let first = *reader.peek(0)?;
-
-    let is_inline = first & 0b10 == 0;
-    if is_inline {
-        let value = match first & 0b01 {
-            0b00 => reader.next_u8_le()?     as u64,
-            0b01 => reader.next_u16_le()? as u64,
-            _ => unreachable!(),
-        };
-        Some(value >> 2)
-    }
-    else {
-        unimplemented!()
-    }
 }
 
 
@@ -228,9 +197,7 @@ impl Encoder {
     }
 
     pub fn append_symbol(&mut self, symbol: &[u8]) {
-        assert!(symbol.len() < 1 << 14);
-
-        let (bytes, length) = encode_symbol_length(symbol.len() as u64);
+        let (bytes, length) = encode_size((symbol.len() << 1 | 1) as u64);
         self.append(&bytes[..length]);
         self.append(symbol);
     }
@@ -373,7 +340,7 @@ enum DecodedPayload<'val> {
     Decimal64 ([u8; 8]),
     Bytes     (&'val [u8]),
     String    (&'val str ),
-    Symbol,
+    Symbol    (&'val [u8]),
     List      (&'val [u8]),
 }
 
@@ -395,16 +362,14 @@ fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Result<D
         Float64   => { DecodedPayload::Float64(reader.next_f64_le().ok_or(())?) },
         Decimal32 => { DecodedPayload::Decimal32(reader.next_bytes_le::<4>().ok_or(())?) },
         Decimal64 => { DecodedPayload::Decimal64(reader.next_bytes_le::<8>().ok_or(())?) },
-        Nat   => { DecodedPayload::Nat(decode_var_bytes(reader).ok_or(())?) },
-        Int   => { DecodedPayload::Int(decode_var_bytes(reader).ok_or(())?) },
-        Bytes => { DecodedPayload::Bytes(decode_var_bytes(reader).ok_or(())?) },
-        List  => { DecodedPayload::List(decode_var_bytes(reader).ok_or(())?) },
+        Nat    => { DecodedPayload::Nat(decode_var_bytes(reader).ok_or(())?) },
+        Int    => { DecodedPayload::Int(decode_var_bytes(reader).ok_or(())?) },
+        Bytes  => { DecodedPayload::Bytes(decode_var_bytes(reader).ok_or(())?) },
+        Symbol => { DecodedPayload::Symbol(decode_var_bytes(reader).ok_or(())?) },
+        List   => { DecodedPayload::List(decode_var_bytes(reader).ok_or(())?) },
         String => {
             let bytes = decode_var_bytes(reader).ok_or(())?;
             DecodedPayload::String(std::str::from_utf8(bytes).ok().ok_or(())?)
-        },
-        Symbol => {
-            unimplemented!()
         },
     })
 }
@@ -423,6 +388,21 @@ fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
     Some((count, reader))
 }
 
+
+enum TagSymbol<'val> {
+    Bytes (&'val [u8]),
+}
+
+fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<TagSymbol<'val>> {
+    let size = decode_size(reader)?;
+    let (size, is_bytes) = (size >> 1, size & 1 != 0);
+    if is_bytes {
+        Some(TagSymbol::Bytes(reader.next_n(size as usize)?))
+    }
+    else {
+        unimplemented!()
+    }
+}
 
 
 struct TagDecoder<'val> {
@@ -448,13 +428,12 @@ impl<'val> TagDecoder<'val> {
 }
 
 impl<'val> Iterator for TagDecoder<'val> {
-    type Item = (&'val [u8], DecodedValue<'val>);
+    type Item = (TagSymbol<'val>, DecodedValue<'val>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining > 0 {
-            let symbol_size = decode_symbol_length(&mut self.reader)? as usize;
-            let symbol      = self.reader.next_n(symbol_size)?;
-            let value       = decode(&mut self.reader).ok()?;
+            let symbol = decode_tag_symbol(&mut self.reader)?;
+            let value  = decode(&mut self.reader).ok()?;
             self.remaining -= 1;
             return Some((symbol, value))
         }
@@ -620,8 +599,9 @@ fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
 
                 let mut tags = value.tags().ok_or(())?;
                 for (symbol, value) in &mut tags {
+                    let symbol = match symbol { TagSymbol::Bytes (symbol) => symbol, };
                     let symbol = std::string::String::from_utf8(symbol.into()).ok().ok_or(())?;
-                    let value  = _decode_json(&value)?;
+                    let value = _decode_json(&value)?;
                     map.insert(symbol, value);
                 }
                 tags.check_error()?;
