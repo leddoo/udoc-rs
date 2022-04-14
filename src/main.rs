@@ -228,7 +228,7 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
     }
 
     if has_tags {
-        let size = decode_size(reader).ok_or(())? as usize;
+        let size: usize = decode_size(reader).ok_or(())?.try_into().ok().ok_or(())?;
         result.tags = reader.next_n(size).ok_or(())?;
     }
 
@@ -299,14 +299,14 @@ fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Result<D
 
 
 fn decode_var_bytes<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
-    let size = decode_size(reader)? as usize;
+    let size: usize = decode_size(reader)?.try_into().ok()?;
     reader.next_n(size)
 }
 
 fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
     let mut reader = Reader::new(buffer);
     let count =
-        if reader.has_some() { decode_size(&mut reader)? as usize }
+        if reader.has_some() { decode_size(&mut reader)?.try_into().ok()? }
         else                 { 0 };
     Some((count, reader))
 }
@@ -320,7 +320,7 @@ fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<TagSymbol<'v
     let size = decode_size(reader)?;
     let (size, is_bytes) = (size >> 1, size & 1 != 0);
     if is_bytes {
-        Some(TagSymbol::Bytes(reader.next_n(size as usize)?))
+        Some(TagSymbol::Bytes(reader.next_n(size.try_into().ok()?)?))
     }
     else {
         unimplemented!()
