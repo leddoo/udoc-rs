@@ -57,53 +57,26 @@ impl<'rdr, T> Reader<'rdr, T> {
 }
 
 impl<'rdr> Reader<'rdr, u8> {
-    pub fn next_u8(&mut self) -> Option<u8> {
-        self.next().map(|result| *result)
+    pub fn next_bytes_le<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let mut bytes = [0; N];
+        bytes.copy_from_slice(self.next_n(N)?);
+        #[cfg(not(target_endian = "little"))]
+            bytes.reverse();
+        Some(bytes)
     }
 
-    pub fn next_u16_le(&mut self) -> Option<u16> {
-        if self.has_n(2) {
-            let bytes = unsafe {[
-                *self.buffer.get_unchecked(self.cursor + 0),
-                *self.buffer.get_unchecked(self.cursor + 1),
-            ]};
-            self.cursor += 2;
-            return Some(u16::from_le_bytes(bytes))
-        }
-        None
-    }
+    pub fn next_u8_le(&mut self)  -> Option<u8>  { self.next_bytes_le::<1>().map(u8::from_ne_bytes) }
+    pub fn next_u16_le(&mut self) -> Option<u16> { self.next_bytes_le::<2>().map(u16::from_ne_bytes) }
+    pub fn next_u32_le(&mut self) -> Option<u32> { self.next_bytes_le::<4>().map(u32::from_ne_bytes) }
+    pub fn next_u64_le(&mut self) -> Option<u64> { self.next_bytes_le::<8>().map(u64::from_ne_bytes) }
 
-    pub fn next_u32_le(&mut self) -> Option<u32> {
-        if self.has_n(4) {
-            let bytes = unsafe {[
-                *self.buffer.get_unchecked(self.cursor + 0),
-                *self.buffer.get_unchecked(self.cursor + 1),
-                *self.buffer.get_unchecked(self.cursor + 2),
-                *self.buffer.get_unchecked(self.cursor + 3),
-            ]};
-            self.cursor += 4;
-            return Some(u32::from_le_bytes(bytes))
-        }
-        None
-    }
+    pub fn next_i8_le(&mut self)  -> Option<i8>  { self.next_bytes_le::<1>().map(i8::from_ne_bytes) }
+    pub fn next_i16_le(&mut self) -> Option<i16> { self.next_bytes_le::<2>().map(i16::from_ne_bytes) }
+    pub fn next_i32_le(&mut self) -> Option<i32> { self.next_bytes_le::<4>().map(i32::from_ne_bytes) }
+    pub fn next_i64_le(&mut self) -> Option<i64> { self.next_bytes_le::<8>().map(i64::from_ne_bytes) }
 
-    pub fn next_u64_le(&mut self) -> Option<u64> {
-        if self.has_n(8) {
-            let bytes = unsafe {[
-                *self.buffer.get_unchecked(self.cursor + 0),
-                *self.buffer.get_unchecked(self.cursor + 1),
-                *self.buffer.get_unchecked(self.cursor + 2),
-                *self.buffer.get_unchecked(self.cursor + 3),
-                *self.buffer.get_unchecked(self.cursor + 4),
-                *self.buffer.get_unchecked(self.cursor + 5),
-                *self.buffer.get_unchecked(self.cursor + 6),
-                *self.buffer.get_unchecked(self.cursor + 7),
-            ]};
-            self.cursor += 8;
-            return Some(u64::from_le_bytes(bytes))
-        }
-        None
-    }
+    pub fn next_f32_le(&mut self) -> Option<f32> { self.next_bytes_le::<4>().map(f32::from_ne_bytes) }
+    pub fn next_f64_le(&mut self) -> Option<f64> { self.next_bytes_le::<8>().map(f64::from_ne_bytes) }
 }
 
 
@@ -162,7 +135,7 @@ fn encode_size(value: u64) -> ([u8; 8], usize) {
 fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
     let first = *reader.peek(0)?;
     let value = match first & 0b11 {
-        0b00 => reader.next_u8()? as u64,
+        0b00 => reader.next_u8_le()? as u64,
         0b01 => reader.next_u16_le()? as u64,
         0b10 => reader.next_u32_le()? as u64,
         0b11 => reader.next_u64_le()?,
@@ -198,7 +171,7 @@ fn decode_symbol_length(reader: &mut Reader<u8>) -> Option<u64> {
     let is_inline = first & 0b10 == 0;
     if is_inline {
         let value = match first & 0b01 {
-            0b00 => reader.next_u8()?     as u64,
+            0b00 => reader.next_u8_le()?     as u64,
             0b01 => reader.next_u16_le()? as u64,
             _ => unreachable!(),
         };
@@ -336,11 +309,11 @@ struct DecodedValue<'val> {
 
     schema_type: &'val [u8],
     tags: &'val [u8],
-    payload: &'val [u8],
+    payload: DecodedPayload<'val>,
 }
 
 fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()> {
-    let header = reader.next_u8().ok_or(())?;
+    let header = reader.next_u8_le().ok_or(())?;
 
     let ty: WireType = {
         let ty = header & WIRE_TYPE_MASK;
@@ -357,7 +330,7 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
         ty, has_schema_type, has_tags,
         schema_type: &reader.buffer[0..0],
         tags:        &reader.buffer[0..0],
-        payload:     &reader.buffer[0..0],
+        payload:     DecodedPayload::Null,
     };
 
     if has_schema_type {
@@ -369,31 +342,7 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
         result.tags = reader.next_n(size).ok_or(())?;
     }
 
-    use WireType::*;
-    result.payload = match ty {
-        Null | BoolFalse | BoolTrue => {
-            &reader.buffer[0..0]
-        },
-        Nat8 | Int8 => {
-            reader.next_n(1).ok_or(())?
-        },
-        Nat16 | Int16 => {
-            reader.next_n(2).ok_or(())?
-        },
-        Nat32 | Int32 | Float32 | Decimal32 => {
-            reader.next_n(4).ok_or(())?
-        },
-        Nat64 | Int64 | Float64 | Decimal64 => {
-            reader.next_n(8).ok_or(())?
-        },
-        Nat | Int | Bytes | String | List => {
-            let size = decode_size(reader).ok_or(())? as usize;
-            reader.next_n(size).ok_or(())?
-        },
-        Symbol => {
-            unimplemented!()
-        },
-    };
+    result.payload = decode_payload(ty, reader)?;
 
     Ok(result)
 }
@@ -405,9 +354,70 @@ impl<'val> DecodedValue<'val> {
 }
 
 
+enum DecodedPayload<'val> {
+    Null,
+    Bool      (bool),
+    Nat       (&'val [u8]),
+    Nat8      (u8),
+    Nat16     (u16),
+    Nat32     (u32),
+    Nat64     (u64),
+    Int       (&'val [u8]),
+    Int8      (i8),
+    Int16     (i16),
+    Int32     (i32),
+    Int64     (i64),
+    Float32   (f32),
+    Float64   (f64),
+    Decimal32 ([u8; 4]),
+    Decimal64 ([u8; 8]),
+    Bytes     (&'val [u8]),
+    String    (&'val str ),
+    Symbol,
+    List      (&'val [u8]),
+}
+
+fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Result<DecodedPayload<'val>, ()> {
+    use WireType::*;
+    Ok(match ty {
+        Null      => { DecodedPayload::Null },
+        BoolFalse => { DecodedPayload::Bool(false) },
+        BoolTrue  => { DecodedPayload::Bool(true) },
+        Nat8      => { DecodedPayload::Nat8(reader.next_u8_le().ok_or(())?) },
+        Nat16     => { DecodedPayload::Nat16(reader.next_u16_le().ok_or(())?) },
+        Nat32     => { DecodedPayload::Nat32(reader.next_u32_le().ok_or(())?) },
+        Nat64     => { DecodedPayload::Nat64(reader.next_u64_le().ok_or(())?) },
+        Int8      => { DecodedPayload::Int8(reader.next_i8_le().ok_or(())?) },
+        Int16     => { DecodedPayload::Int16(reader.next_i16_le().ok_or(())?) },
+        Int32     => { DecodedPayload::Int32(reader.next_i32_le().ok_or(())?) },
+        Int64     => { DecodedPayload::Int64(reader.next_i64_le().ok_or(())?) },
+        Float32   => { DecodedPayload::Float32(reader.next_f32_le().ok_or(())?) },
+        Float64   => { DecodedPayload::Float64(reader.next_f64_le().ok_or(())?) },
+        Decimal32 => { DecodedPayload::Decimal32(reader.next_bytes_le::<4>().ok_or(())?) },
+        Decimal64 => { DecodedPayload::Decimal64(reader.next_bytes_le::<8>().ok_or(())?) },
+        Nat   => { DecodedPayload::Nat(decode_var_bytes(reader).ok_or(())?) },
+        Int   => { DecodedPayload::Int(decode_var_bytes(reader).ok_or(())?) },
+        Bytes => { DecodedPayload::Bytes(decode_var_bytes(reader).ok_or(())?) },
+        List  => { DecodedPayload::List(decode_var_bytes(reader).ok_or(())?) },
+        String => {
+            let bytes = decode_var_bytes(reader).ok_or(())?;
+            DecodedPayload::String(std::str::from_utf8(bytes).ok().ok_or(())?)
+        },
+        Symbol => {
+            unimplemented!()
+        },
+    })
+}
+
+
+fn decode_var_bytes<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
+    let size = decode_size(reader)? as usize;
+    reader.next_n(size)
+}
+
 fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
     let mut reader = Reader::new(buffer);
-    let count = 
+    let count =
         if reader.has_some() { decode_size(&mut reader)? as usize }
         else                 { 0 };
     Some((count, reader))
@@ -567,8 +577,8 @@ fn decode_json(buffer: &[u8]) -> Result<Value, ()> {
 }
 
 fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
-    use WireType::*;
-    let result = match value.ty {
+    use DecodedPayload::*;
+    let result = match value.payload {
         Null => {
             if value.has_tags {
                 let mut map = serde_json::Map::new();
@@ -588,17 +598,9 @@ fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
             }
         },
 
-        BoolFalse => { Value::Bool(false) },
-        BoolTrue  => { Value::Bool(true) },
+        Bool (value) => { Value::Bool(value) },
 
-        Float64 => {
-            let value = {
-                let mut bytes = [0; 8];
-                bytes.copy_from_slice(value.payload);
-                f64::from_le_bytes(bytes)
-            };
-
-            // temp
+        Float64 (value) => {
             let number =
                 if value as u64 as f64 == value {
                     if value >= 0.0 {
@@ -615,14 +617,12 @@ fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
             Value::Number(number)
         },
 
-        String => {
-            let string = value.payload.to_vec();
-            let string = std::string::String::from_utf8(string).ok().ok_or(())?;
-            Value::String(string)
+        String (value) => {
+            Value::String(value.into())
         },
 
-        List => {
-            let mut payload = ListDecoder::new(value.payload).ok_or(())?;
+        List (value) => {
+            let mut payload = ListDecoder::new(value).ok_or(())?;
 
             let mut values = vec![];
             values.reserve(payload.remaining);
@@ -756,7 +756,7 @@ fn main() {
             let _ = v.clone();
         });
     }
-    
+
 
     if 1 == 1 {
         let v: Value = serde_json::from_slice(canada).unwrap();
