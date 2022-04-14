@@ -1,84 +1,7 @@
 
-#[derive(Clone)]
-struct Reader<'buf, T> {
-    pub buffer: &'buf [T],
-    pub cursor: usize,
-}
+mod reader;
 
-#[allow(dead_code)]
-impl<'rdr, T> Reader<'rdr, T> {
-    pub fn new(buffer: &'rdr [T]) -> Reader<'rdr, T> {
-        Reader { buffer: buffer, cursor: 0 }
-    }
-
-    pub fn remaining(&self) -> usize {
-        self.buffer.len() - self.cursor
-    }
-
-    pub fn peek(&self, offset: usize) -> Option<&'rdr T> {
-        self.buffer.get(self.cursor + offset)
-    }
-
-    pub fn empty(&self) -> bool {
-        !self.has_some()
-    }
-
-    pub fn has_some(&self) -> bool {
-        self.cursor < self.buffer.len()
-    }
-
-    pub fn next(&mut self) -> Option<&'rdr T> {
-        self.buffer.get(self.cursor).map(|result| {
-            self.cursor += 1;
-            result
-        })
-    }
-
-    pub fn has_n(&self, n: usize) -> bool {
-        self.cursor + n <= self.buffer.len()
-    }
-
-    pub fn peek_next_n(&self, n: usize) -> Option<&'rdr [T]> {
-        if self.has_n(n) {
-            return Some(&self.buffer[self.cursor .. self.cursor + n]);
-        }
-        None
-    }
-
-    pub fn next_n(&mut self, n: usize) -> Option<&'rdr [T]> {
-        self.peek_next_n(n).map(|result| {
-            self.cursor += n;
-            result
-        })
-    }
-
-    pub fn rest(&self) -> &'rdr [T] {
-        &self.buffer[self.cursor..]
-    }
-}
-
-impl<'rdr> Reader<'rdr, u8> {
-    pub fn next_bytes_le<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let mut bytes = [0; N];
-        bytes.copy_from_slice(self.next_n(N)?);
-        #[cfg(not(target_endian = "little"))]
-            bytes.reverse();
-        Some(bytes)
-    }
-
-    pub fn next_u8_le(&mut self)  -> Option<u8>  { self.next_bytes_le::<1>().map(u8::from_ne_bytes) }
-    pub fn next_u16_le(&mut self) -> Option<u16> { self.next_bytes_le::<2>().map(u16::from_ne_bytes) }
-    pub fn next_u32_le(&mut self) -> Option<u32> { self.next_bytes_le::<4>().map(u32::from_ne_bytes) }
-    pub fn next_u64_le(&mut self) -> Option<u64> { self.next_bytes_le::<8>().map(u64::from_ne_bytes) }
-
-    pub fn next_i8_le(&mut self)  -> Option<i8>  { self.next_bytes_le::<1>().map(i8::from_ne_bytes) }
-    pub fn next_i16_le(&mut self) -> Option<i16> { self.next_bytes_le::<2>().map(i16::from_ne_bytes) }
-    pub fn next_i32_le(&mut self) -> Option<i32> { self.next_bytes_le::<4>().map(i32::from_ne_bytes) }
-    pub fn next_i64_le(&mut self) -> Option<i64> { self.next_bytes_le::<8>().map(i64::from_ne_bytes) }
-
-    pub fn next_f32_le(&mut self) -> Option<f32> { self.next_bytes_le::<4>().map(f32::from_ne_bytes) }
-    pub fn next_f64_le(&mut self) -> Option<f64> { self.next_bytes_le::<8>().map(f64::from_ne_bytes) }
-}
+use reader::Reader;
 
 
 
@@ -123,15 +46,15 @@ fn encode_size(value: u64) -> ([u8; 8], usize) {
 
     let value = value << 2;
     let (value, length) =
-        if      bits <= 6      { (value | 0b00, 1) }
-        else if bits <= 6 +  8 { (value | 0b01, 2) }
-        else if bits <= 6 + 24 { (value | 0b10, 4) }
-        else                   { (value | 0b11, 8) };
+        if      bits <=  8 - 2 { (value | 0b00, 1) }
+        else if bits <= 16 - 2 { (value | 0b01, 2) }
+        else if bits <= 32 - 2 { (value | 0b10, 4) }
+        else if bits <= 64 - 2 { (value | 0b11, 8) }
+        else { unreachable!() };
 
     (value.to_le_bytes(), length)
 }
 
-#[inline(always)]
 fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
     let first = *reader.peek(0)?;
     let value = match first & 0b11 {
@@ -253,7 +176,7 @@ impl Encoder {
                 string.extend(buffer.next_n(next_size).unwrap());
 
                 let (_size, length) = peek_decode_size(&buffer).unwrap();
-                string.extend(buffer.peek_next_n(length).unwrap());
+                string.extend(buffer.peek_n(length).unwrap());
                 buffer.next_n(8).unwrap();
             }
             else {
