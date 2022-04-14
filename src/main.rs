@@ -500,6 +500,41 @@ impl<'val> Iterator for ListDecoder<'val> {
 
 
 
+fn validate(buffer: &[u8]) -> Result<(), ()> {
+    let mut reader = Reader::new(buffer);
+    _validate(&decode(&mut reader)?)?;
+    if reader.has_some() {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn _validate(value: &DecodedValue) -> Result<(), ()> {
+    if value.has_tags {
+        let mut tags = value.tags().ok_or(())?;
+        for (_symbol, value) in &mut tags {
+            _validate(&value)?;
+        }
+        tags.check_error()?;
+    }
+
+    use DecodedPayload::*;
+    match value.payload {
+        List (value) => {
+            let mut payload = ListDecoder::new(value).ok_or(())?;
+            for value in &mut payload {
+                _validate(&value)?;
+            }
+            payload.check_error()?;
+        },
+
+        _ => (),
+    }
+
+    Ok(())
+}
+
+
 
 use serde_json::{Value};
 
@@ -709,6 +744,15 @@ fn main() {
 
 
     if 1 == 1 {
+        let v: Value = serde_json::from_slice(sleep).unwrap();
+        let udoc = encode_json(&v);
+        let length = udoc.len();
+        bench("sleep validate udoc", length, || {
+            validate(&udoc).unwrap();
+        });
+    }
+
+    if 1 == 1 {
         let udoc = encode_json(&v);
         let length = udoc.len();
 
@@ -737,6 +781,15 @@ fn main() {
         let v: Value = serde_json::from_slice(twitter).unwrap();
         let udoc = encode_json(&v);
         let length = udoc.len();
+        bench("twitter validate udoc", length, || {
+            validate(&udoc).unwrap();
+        });
+    }
+
+    if 1 == 1 {
+        let v: Value = serde_json::from_slice(twitter).unwrap();
+        let udoc = encode_json(&v);
+        let length = udoc.len();
         bench("twitter decode udoc", length, || {
             decode_json(&udoc).unwrap();
         });
@@ -757,6 +810,15 @@ fn main() {
         });
     }
 
+
+    if 1 == 1 {
+        let v: Value = serde_json::from_slice(canada).unwrap();
+        let udoc = encode_json(&v);
+        let length = udoc.len();
+        bench("canada validate udoc", length, || {
+            validate(&udoc).unwrap();
+        });
+    }
 
     if 1 == 1 {
         let v: Value = serde_json::from_slice(canada).unwrap();
