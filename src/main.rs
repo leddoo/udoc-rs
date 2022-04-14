@@ -1,490 +1,28 @@
-
 mod reader;
+mod common;
+mod encoder;
+mod decoder;
 
-use reader::Reader;
+use reader::*;
+use common::*;
+use encoder::{Encoder};
+use decoder::{decode_value, ListDecoder, TagSymbol};
 
 
 
-#[allow(dead_code)]
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WireType {
-    Null        =  1,
-    BoolFalse   =  2,
-    BoolTrue    =  3,
-    Nat         =  4,
-    Nat8        =  5,
-    Nat16       =  6,
-    Nat32       =  7,
-    Nat64       =  8,
-    Int         =  9,
-    Int8        = 10,
-    Int16       = 11,
-    Int32       = 12,
-    Int64       = 13,
-    Float32     = 14,
-    Float64     = 15,
-    Decimal32   = 16,
-    Decimal64   = 17,
-    Bytes       = 18,
-    String      = 19,
-    Symbol      = 20,
-    List        = 21,
-}
-
-const WIRE_TYPE_MIN:  u8 =  1;
-const WIRE_TYPE_MAX:  u8 = 21;
-const WIRE_TYPE_MASK: u8 = 32 - 1;
-
-const WIRE_FLAG_SCHEMA_TYPE: u8 = 0x40;
-const WIRE_FLAG_TAGS:        u8 = 0x80;
-
-
-
-fn encode_size(value: u64) -> ([u8; 8], usize) {
-    let bits = 64 - value.leading_zeros();
-
-    let value = value << 2;
-    let (value, length) =
-        if      bits <=  8 - 2 { (value | 0b00, 1) }
-        else if bits <= 16 - 2 { (value | 0b01, 2) }
-        else if bits <= 32 - 2 { (value | 0b10, 4) }
-        else if bits <= 64 - 2 { (value | 0b11, 8) }
-        else { unreachable!() };
-
-    (value.to_le_bytes(), length)
-}
-
-fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
-    let first = *reader.peek(0)?;
-    let value = match first & 0b11 {
-        0b00 => reader.next_u8_le()? as u64,
-        0b01 => reader.next_u16_le()? as u64,
-        0b10 => reader.next_u32_le()? as u64,
-        0b11 => reader.next_u64_le()?,
-        _    => unreachable!()
-    };
-    Some(value >> 2)
-}
-
-fn peek_decode_size(reader: &Reader<u8>) -> Option<(u64, usize)> {
-    let mut reader = reader.clone();
-    let old_cursor = reader.cursor;
-    let size = decode_size(&mut reader)?;
-    Some((size, reader.cursor - old_cursor))
-}
-
-
-
-#[derive(Debug, Clone)]
-enum EncoderError {
-    SizeOverflow,
-}
-
-struct Encoder {
-    buffer: Vec<u8>,
-    sizers: Vec<Sizer>,
-
-    size_offsets: Vec<u8>, // relative, encoded with udoc size encoding.
-    last_size_offset: usize,
-
-    size_max_bytes: usize,
-    compress_sizes: bool,
-    size_overflow: bool,
-}
-
-struct Sizer {
-    offset: usize,
-    size:   usize,
-}
-
-impl Encoder {
-    pub fn new(size_max_bytes: usize, compress_sizes: bool) -> Encoder {
-        match size_max_bytes { 1 | 2 | 4 | 8 => (), _ => unreachable!() }
-
-        Encoder {
-            buffer: vec![],
-            sizers: vec![ Sizer { offset: 0, size: 0 } ],
-
-            size_offsets: vec![],
-            last_size_offset: 0,
-
-            size_max_bytes,
-            compress_sizes,
-            size_overflow: false,
-        }
-    }
-
-    fn commit_size(&mut self, size: usize) {
-        self.sizers.last_mut().unwrap().size += size;
-    }
-
-    pub fn append(&mut self, bytes: &[u8]) {
-        self.buffer.extend(bytes);
-        self.commit_size(bytes.len());
-    }
-
-    pub fn append_byte(&mut self, byte: u8) {
-        self.buffer.push(byte);
-        self.commit_size(1);
-    }
-
-    pub fn append_size(&mut self, value: u64) {
-        let (bytes, length) = encode_size(value);
-        self.append(&bytes[..length]);
-    }
-
-    pub fn append_symbol(&mut self, symbol: &[u8]) {
-        let (bytes, length) = encode_size((symbol.len() << 1 | 1) as u64);
-        self.append(&bytes[..length]);
-        self.append(symbol);
-    }
-
-
-    pub fn begin_size(&mut self) {
-        let offset = self.buffer.len();
-        self.buffer.extend((0..self.size_max_bytes).map(|_| 0));
-        self.sizers.push(Sizer { offset: offset, size: 0 });
-
-        if self.compress_sizes {
-            let delta = (offset - self.last_size_offset) as u64;
-            let (delta, length) = encode_size(delta);
-            self.size_offsets.extend(&delta[..length]);
-            self.last_size_offset = offset;
-        }
-    }
-
-    pub fn end_size(&mut self) {
-        assert!(self.sizers.len() > 1);
-        let sizer = self.sizers.pop().unwrap();
-
-        let (size, length) = encode_size(sizer.size as u64);
-        if length > self.size_max_bytes {
-            self.size_overflow = true;
-        }
-
-        let offset = sizer.offset;
-        match self.size_max_bytes {
-            1 => self.buffer[offset..offset + 1].copy_from_slice(&size[0..1]),
-            2 => self.buffer[offset..offset + 2].copy_from_slice(&size[0..2]),
-            4 => self.buffer[offset..offset + 4].copy_from_slice(&size[0..4]),
-            8 => self.buffer[offset..offset + 8].copy_from_slice(&size[0..8]),
-            _ => unreachable!()
-        }
-
-        if self.compress_sizes {
-            self.commit_size(length + sizer.size);
-        }
-        else {
-            self.commit_size(self.size_max_bytes + sizer.size);
-        }
-    }
-
-    pub fn size(&self) -> usize {
-        assert!(self.sizers.len() == 1);
-        self.sizers[0].size
-    }
-
-    fn compress(&self, dest: &mut Vec<u8>) {
-        let size = self.size();
-
-        let old_length = dest.len();
-        dest.reserve(size);
-
-        let mut buffer  = Reader::new(&self.buffer);
-        let mut offsets = Reader::new(&self.size_offsets);
-        let mut first = true;
-
-        while buffer.has_some() {
-            if offsets.has_some() {
-                let next_size = decode_size(&mut offsets).unwrap();
-
-                let mut next_size = next_size as usize;
-                if first {
-                    first = false;
-                }
-                else {
-                    // note: the offsets are the number of bytes between two
-                    // sizes in the buffer. the previous size's bytes are
-                    // already consumed.
-                    next_size -= self.size_max_bytes;
-                }
-
-                dest.extend(buffer.next_n(next_size).unwrap());
-
-                let (_size, length) = peek_decode_size(&buffer).unwrap();
-                dest.extend(buffer.peek_n(length).unwrap());
-                buffer.next_n(self.size_max_bytes).unwrap();
-            }
-            else {
-                dest.extend(buffer.rest());
-                break;
-            }
-        }
-        assert_eq!(dest.len() - old_length, size);
-    }
-
-    pub fn build(self) -> Result<Vec<u8>, EncoderError> {
-        assert!(self.sizers.len() == 1);
-        if self.size_overflow {
-            return Err(EncoderError::SizeOverflow);
-        }
-
-        if self.compress_sizes {
-            let mut result = vec![];
-            self.compress(&mut result);
-            Ok(result)
-        }
-        else {
-            Ok(self.buffer)
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn build_append(&self, dest: &mut Vec<u8>) -> Result<(), EncoderError> {
-        assert!(self.sizers.len() == 1);
-        if self.size_overflow {
-            return Err(EncoderError::SizeOverflow);
-        }
-
-        if self.compress_sizes {
-            self.compress(dest);
-        }
-        else {
-            dest.extend(&self.buffer);
-        }
-        Ok(())
-    }
-}
-
-impl Default for Encoder {
-    fn default() -> Encoder {
-        Encoder::new(8, true)
-    }
-}
-
-
-#[allow(dead_code)]
-struct DecodedValue<'val> {
-    ty: WireType,
-    has_schema_type: bool,
-    has_tags: bool,
-
-    schema_type: &'val [u8],
-    tags: &'val [u8],
-    payload: DecodedPayload<'val>,
-}
-
-fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()> {
-    let header = reader.next_u8_le().ok_or(())?;
-
-    let ty: WireType = {
-        let ty = header & WIRE_TYPE_MASK;
-        if !(ty >= WIRE_TYPE_MIN && ty <= WIRE_TYPE_MAX) {
-            return Err(());
-        }
-        unsafe { std::mem::transmute(ty) }
-    };
-
-    let has_schema_type = header & WIRE_FLAG_SCHEMA_TYPE != 0;
-    let has_tags        = header & WIRE_FLAG_TAGS != 0;
-
-    let mut result = DecodedValue {
-        ty, has_schema_type, has_tags,
-        schema_type: &reader.buffer[0..0],
-        tags:        &reader.buffer[0..0],
-        payload:     DecodedPayload::Null,
-    };
-
-    if has_schema_type {
-        unimplemented!();
-    }
-
-    if has_tags {
-        let size: usize = decode_size(reader).ok_or(())?.try_into().ok().ok_or(())?;
-        result.tags = reader.next_n(size).ok_or(())?;
-    }
-
-    result.payload = decode_payload(ty, reader)?;
-
-    Ok(result)
-}
-
-impl<'val> DecodedValue<'val> {
-    fn tags(&self) -> Option<TagDecoder> {
-        TagDecoder::new(self.tags)
-    }
-}
-
-
-enum DecodedPayload<'val> {
-    Null,
-    Bool      (bool),
-    Nat       (&'val [u8]),
-    Nat8      (u8),
-    Nat16     (u16),
-    Nat32     (u32),
-    Nat64     (u64),
-    Int       (&'val [u8]),
-    Int8      (i8),
-    Int16     (i16),
-    Int32     (i32),
-    Int64     (i64),
-    Float32   (f32),
-    Float64   (f64),
-    Decimal32 ([u8; 4]),
-    Decimal64 ([u8; 8]),
-    Bytes     (&'val [u8]),
-    String    (&'val str ),
-    Symbol    (&'val [u8]),
-    List      (&'val [u8]),
-}
-
-fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Result<DecodedPayload<'val>, ()> {
-    use WireType::*;
-    Ok(match ty {
-        Null      => { DecodedPayload::Null },
-        BoolFalse => { DecodedPayload::Bool(false) },
-        BoolTrue  => { DecodedPayload::Bool(true) },
-        Nat8      => { DecodedPayload::Nat8(reader.next_u8_le().ok_or(())?) },
-        Nat16     => { DecodedPayload::Nat16(reader.next_u16_le().ok_or(())?) },
-        Nat32     => { DecodedPayload::Nat32(reader.next_u32_le().ok_or(())?) },
-        Nat64     => { DecodedPayload::Nat64(reader.next_u64_le().ok_or(())?) },
-        Int8      => { DecodedPayload::Int8(reader.next_i8_le().ok_or(())?) },
-        Int16     => { DecodedPayload::Int16(reader.next_i16_le().ok_or(())?) },
-        Int32     => { DecodedPayload::Int32(reader.next_i32_le().ok_or(())?) },
-        Int64     => { DecodedPayload::Int64(reader.next_i64_le().ok_or(())?) },
-        Float32   => { DecodedPayload::Float32(reader.next_f32_le().ok_or(())?) },
-        Float64   => { DecodedPayload::Float64(reader.next_f64_le().ok_or(())?) },
-        Decimal32 => { DecodedPayload::Decimal32(reader.next_bytes_le::<4>().ok_or(())?) },
-        Decimal64 => { DecodedPayload::Decimal64(reader.next_bytes_le::<8>().ok_or(())?) },
-        Nat    => { DecodedPayload::Nat(decode_var_bytes(reader).ok_or(())?) },
-        Int    => { DecodedPayload::Int(decode_var_bytes(reader).ok_or(())?) },
-        Bytes  => { DecodedPayload::Bytes(decode_var_bytes(reader).ok_or(())?) },
-        Symbol => { DecodedPayload::Symbol(decode_var_bytes(reader).ok_or(())?) },
-        List   => { DecodedPayload::List(decode_var_bytes(reader).ok_or(())?) },
-        String => {
-            let bytes = decode_var_bytes(reader).ok_or(())?;
-            DecodedPayload::String(std::str::from_utf8(bytes).ok().ok_or(())?)
-        },
-    })
-}
-
-
-fn decode_var_bytes<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
-    let size: usize = decode_size(reader)?.try_into().ok()?;
-    reader.next_n(size)
-}
-
-fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
-    let mut reader = Reader::new(buffer);
-    let count =
-        if reader.has_some() { decode_size(&mut reader)?.try_into().ok()? }
-        else                 { 0 };
-    Some((count, reader))
-}
-
-
-enum TagSymbol<'val> {
-    Bytes (&'val [u8]),
-}
-
-fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<TagSymbol<'val>> {
-    let size = decode_size(reader)?;
-    let (size, is_bytes) = (size >> 1, size & 1 != 0);
-    if is_bytes {
-        Some(TagSymbol::Bytes(reader.next_n(size.try_into().ok()?)?))
-    }
-    else {
-        unimplemented!()
-    }
-}
-
-
-struct TagDecoder<'val> {
-    remaining: usize,
-    reader: Reader<'val, u8>,
-}
-
-impl<'val> TagDecoder<'val> {
-    fn new(tags: &'val [u8]) -> Option<TagDecoder> {
-        let (remaining, reader) = decode_list(tags)?;
-        if reader.remaining() < 2*remaining {
-            return None;
-        }
-        Some(TagDecoder { remaining, reader })
-    }
-
-    fn check_error(&self) -> Result<(), ()> {
-        if self.remaining > 0 || self.reader.has_some() {
-            return Err(());
-        }
-        Ok(())
-    }
-}
-
-impl<'val> Iterator for TagDecoder<'val> {
-    type Item = (TagSymbol<'val>, DecodedValue<'val>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining > 0 {
-            let symbol = decode_tag_symbol(&mut self.reader)?;
-            let value  = decode(&mut self.reader).ok()?;
-            self.remaining -= 1;
-            return Some((symbol, value))
-        }
-        None
-    }
-}
-
-
-struct ListDecoder<'val> {
-    remaining: usize,
-    reader: Reader<'val, u8>,
-}
-
-impl<'val> ListDecoder<'val> {
-    fn new(payload: &'val [u8]) -> Option<ListDecoder> {
-        let (remaining, reader) = decode_list(payload)?;
-        if reader.remaining() < remaining {
-            return None;
-        }
-        Some(ListDecoder { remaining, reader })
-    }
-
-    fn check_error(&self) -> Result<(), ()> {
-        if self.remaining > 0 || self.reader.has_some() {
-            return Err(());
-        }
-        Ok(())
-    }
-}
-
-impl<'val> Iterator for ListDecoder<'val> {
-    type Item = DecodedValue<'val>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining > 0 {
-            let value = decode(&mut self.reader).ok()?;
-            self.remaining -= 1;
-            return Some(value)
-        }
-        None
-    }
-}
 
 
 
 fn validate(buffer: &[u8]) -> Result<(), ()> {
     let mut reader = Reader::new(buffer);
-    _validate(&decode(&mut reader)?)?;
+    _validate(&decode_value(&mut reader)?)?;
     if reader.has_some() {
         return Err(());
     }
     Ok(())
 }
 
-fn _validate(value: &DecodedValue) -> Result<(), ()> {
+fn _validate(value: &decoder::Value) -> Result<(), ()> {
     if value.has_tags {
         let mut tags = value.tags().ok_or(())?;
         for (_symbol, value) in &mut tags {
@@ -493,7 +31,7 @@ fn _validate(value: &DecodedValue) -> Result<(), ()> {
         tags.check_error()?;
     }
 
-    use DecodedPayload::*;
+    use decoder::Payload::*;
     match value.payload {
         List (value) => {
             let mut payload = ListDecoder::new(value).ok_or(())?;
@@ -579,15 +117,15 @@ fn _encode_json(encoder: &mut Encoder, value: &Value) {
 
 fn decode_json(buffer: &[u8]) -> Result<Value, ()> {
     let mut reader = Reader::new(buffer);
-    let value = _decode_json(&decode(&mut reader)?)?;
+    let value = _decode_json(&decode_value(&mut reader)?)?;
     if reader.has_some() {
         return Err(());
     }
     Ok(value)
 }
 
-fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
-    use DecodedPayload::*;
+fn _decode_json(value: &decoder::Value) -> Result<Value, ()> {
+    use decoder::Payload::*;
     let result = match value.payload {
         Null => {
             if value.has_tags {
