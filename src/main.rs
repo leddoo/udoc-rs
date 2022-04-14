@@ -76,6 +76,11 @@ fn peek_decode_size(reader: &Reader<u8>) -> Option<(u64, usize)> {
 
 
 
+#[derive(Debug, Clone)]
+enum EncoderError {
+    SizeOverflow,
+}
+
 struct Encoder {
     buffer: Vec<u8>,
     sizers: Vec<Sizer>,
@@ -85,6 +90,7 @@ struct Encoder {
 
     size_max_bytes: usize,
     compress_sizes: bool,
+    size_overflow: bool,
 }
 
 struct Sizer {
@@ -105,6 +111,7 @@ impl Encoder {
 
             size_max_bytes,
             compress_sizes,
+            size_overflow: false,
         }
     }
 
@@ -152,8 +159,9 @@ impl Encoder {
         let sizer = self.sizers.pop().unwrap();
 
         let (size, length) = encode_size(sizer.size as u64);
-        // TODO: error handling.
-        assert!(length <= self.size_max_bytes);
+        if length > self.size_max_bytes {
+            self.size_overflow = true;
+        }
 
         let offset = sizer.offset;
         match self.size_max_bytes {
@@ -216,22 +224,28 @@ impl Encoder {
         assert_eq!(dest.len() - old_length, size);
     }
 
-    pub fn build(self) -> Vec<u8> {
+    pub fn build(self) -> Result<Vec<u8>, EncoderError> {
         assert!(self.sizers.len() == 1);
+        if self.size_overflow {
+            return Err(EncoderError::SizeOverflow);
+        }
 
         if self.compress_sizes {
             let mut result = vec![];
             self.compress(&mut result);
-            result
+            Ok(result)
         }
         else {
-            self.buffer
+            Ok(self.buffer)
         }
     }
 
     #[allow(dead_code)]
-    pub fn build_append(&self, dest: &mut Vec<u8>) {
+    pub fn build_append(&self, dest: &mut Vec<u8>) -> Result<(), EncoderError> {
         assert!(self.sizers.len() == 1);
+        if self.size_overflow {
+            return Err(EncoderError::SizeOverflow);
+        }
 
         if self.compress_sizes {
             self.compress(dest);
@@ -239,6 +253,7 @@ impl Encoder {
         else {
             dest.extend(&self.buffer);
         }
+        Ok(())
     }
 }
 
@@ -501,7 +516,7 @@ use serde_json::{Value};
 fn encode_json(value: &Value) -> Vec<u8> {
     let mut encoder = Encoder::default();
     _encode_json(&mut encoder, value);
-    encoder.build()
+    encoder.build().unwrap()
 }
 
 fn _encode_json(encoder: &mut Encoder, value: &Value) {
@@ -697,12 +712,12 @@ fn main() {
         let length = {
             let mut encoder = Encoder::new(4, false);
             _encode_json(&mut encoder, &v);
-            encoder.build().len()
+            encoder.build().unwrap().len()
         };
         bench("sleep encode uncompressed", length, || {
             let mut encoder = Encoder::new(4, false);
             _encode_json(&mut encoder, &v);
-            encoder.build();
+            encoder.build().unwrap();
         });
     }
 
