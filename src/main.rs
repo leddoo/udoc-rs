@@ -13,18 +13,18 @@ use decoder::{decode_value, ListDecoder, TagSymbol};
 
 
 
-fn validate(buffer: &[u8]) -> Result<(), ()> {
+fn validate(buffer: &[u8]) -> decoder::Result<()> {
     let mut reader = Reader::new(buffer);
     _validate(&decode_value(&mut reader)?)?;
     if reader.has_some() {
-        return Err(());
+        return Err(decoder::Error::TrailingData);
     }
     Ok(())
 }
 
-fn _validate(value: &decoder::Value) -> Result<(), ()> {
+fn _validate(value: &decoder::Value) -> decoder::Result<()> {
     if value.has_tags {
-        let mut tags = value.tags().ok_or(())?;
+        let mut tags = value.tags()?;
         for (_symbol, value) in &mut tags {
             _validate(&value)?;
         }
@@ -34,7 +34,7 @@ fn _validate(value: &decoder::Value) -> Result<(), ()> {
     use decoder::Payload::*;
     match value.payload {
         List (value) => {
-            let mut payload = ListDecoder::new(value).ok_or(())?;
+            let mut payload = ListDecoder::new(value)?;
             for value in &mut payload {
                 _validate(&value)?;
             }
@@ -115,26 +115,28 @@ fn _encode_json(encoder: &mut Encoder, value: &Value) {
 
 
 
-fn decode_json(buffer: &[u8]) -> Result<Value, ()> {
+// this should technically use its own error.
+
+fn decode_json(buffer: &[u8]) -> decoder::Result<Value> {
     let mut reader = Reader::new(buffer);
     let value = _decode_json(&decode_value(&mut reader)?)?;
     if reader.has_some() {
-        return Err(());
+        return Err(decoder::Error::TrailingData);
     }
     Ok(value)
 }
 
-fn _decode_json(value: &decoder::Value) -> Result<Value, ()> {
+fn _decode_json(value: &decoder::Value) -> decoder::Result<Value> {
     use decoder::Payload::*;
     let result = match value.payload {
         Null => {
             if value.has_tags {
                 let mut map = serde_json::Map::new();
 
-                let mut tags = value.tags().ok_or(())?;
+                let mut tags = value.tags()?;
                 for (symbol, value) in &mut tags {
                     let symbol = match symbol { TagSymbol::Bytes (symbol) => symbol, };
-                    let symbol = std::string::String::from_utf8(symbol.into()).ok().ok_or(())?;
+                    let symbol = std::string::String::from_utf8(symbol.into()).ok().ok_or(decoder::Error::StringInvalidUtf8)?;
                     let value = _decode_json(&value)?;
                     map.insert(symbol, value);
                 }
@@ -171,10 +173,10 @@ fn _decode_json(value: &decoder::Value) -> Result<Value, ()> {
         },
 
         List (value) => {
-            let mut payload = ListDecoder::new(value).ok_or(())?;
+            let mut payload = ListDecoder::new(value)?;
 
             let mut values = vec![];
-            values.reserve(payload.remaining);
+            values.reserve(payload.remaining());
             for value in &mut payload {
                 values.push(_decode_json(&value)?);
             }
@@ -183,7 +185,7 @@ fn _decode_json(value: &decoder::Value) -> Result<Value, ()> {
             Value::Array(values)
         },
 
-        _ => { return Err(()); },
+        _ => { return Err(decoder::Error::InvalidWireType); },
     };
 
     Ok(result)
