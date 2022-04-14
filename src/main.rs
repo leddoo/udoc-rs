@@ -10,6 +10,10 @@ impl<'rdr, T> Reader<'rdr, T> {
         Reader { buffer: buffer, cursor: 0 }
     }
 
+    pub fn remaining(&self) -> usize {
+        self.buffer.len() - self.cursor
+    }
+
     pub fn peek(&self, offset: usize) -> Option<&'rdr T> {
         self.buffer.get(self.cursor + offset)
     }
@@ -47,7 +51,7 @@ impl<'rdr, T> Reader<'rdr, T> {
         })
     }
 
-    pub fn rest(&self) -> &[T] {
+    pub fn rest(&self) -> &'rdr [T] {
         &self.buffer[self.cursor..]
     }
 }
@@ -155,23 +159,23 @@ fn encode_size(value: u64) -> ([u8; 8], usize) {
 }
 
 #[inline(always)]
-fn decode_size(reader: &mut Reader<u8>) -> Result<u64, ()> {
-    let first = reader.peek(0).ok_or(())?;
+fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
+    let first = *reader.peek(0)?;
     let value = match first & 0b11 {
-        0b00 => reader.next_u8().ok_or(())? as u64,
-        0b01 => reader.next_u16_le().ok_or(())? as u64,
-        0b10 => reader.next_u32_le().ok_or(())? as u64,
-        0b11 => reader.next_u64_le().ok_or(())?,
+        0b00 => reader.next_u8()? as u64,
+        0b01 => reader.next_u16_le()? as u64,
+        0b10 => reader.next_u32_le()? as u64,
+        0b11 => reader.next_u64_le()?,
         _    => unreachable!()
     };
-    Ok(value >> 2)
+    Some(value >> 2)
 }
 
-fn peek_decode_size(reader: &Reader<u8>) -> Result<(u64, usize), ()> {
+fn peek_decode_size(reader: &Reader<u8>) -> Option<(u64, usize)> {
     let mut reader = reader.clone();
     let old_cursor = reader.cursor;
     let size = decode_size(&mut reader)?;
-    Ok((size, reader.cursor - old_cursor))
+    Some((size, reader.cursor - old_cursor))
 }
 
 
@@ -188,17 +192,17 @@ fn encode_symbol_length(value: u64) -> ([u8; 8], usize) {
 }
 
 #[inline(always)]
-fn decode_symbol_length(reader: &mut Reader<u8>) -> Result<u64, ()> {
-    let first = *reader.peek(0).ok_or(())?;
+fn decode_symbol_length(reader: &mut Reader<u8>) -> Option<u64> {
+    let first = *reader.peek(0)?;
 
     let is_inline = first & 0b10 == 0;
     if is_inline {
         let value = match first & 0b01 {
-            0b00 => reader.next_u8().ok_or(())?     as u64,
-            0b01 => reader.next_u16_le().ok_or(())? as u64,
+            0b00 => reader.next_u8()?     as u64,
+            0b01 => reader.next_u16_le()? as u64,
             _ => unreachable!(),
         };
-        Ok(value >> 2)
+        Some(value >> 2)
     }
     else {
         unimplemented!()
@@ -361,7 +365,7 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
     }
 
     if has_tags {
-        let size = decode_size(reader)? as usize;
+        let size = decode_size(reader).ok_or(())? as usize;
         result.tags = reader.next_n(size).ok_or(())?;
     }
 
@@ -383,7 +387,7 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
             reader.next_n(8).ok_or(())?
         },
         Nat | Int | Bytes | String | List => {
-            let size = decode_size(reader)? as usize;
+            let size = decode_size(reader).ok_or(())? as usize;
             reader.next_n(size).ok_or(())?
         },
         Symbol => {
@@ -393,6 +397,97 @@ fn decode<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<DecodedValue<'rdr>, ()>
 
     Ok(result)
 }
+
+impl<'val> DecodedValue<'val> {
+    fn tags(&self) -> Option<TagDecoder> {
+        TagDecoder::new(self.tags)
+    }
+}
+
+
+fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
+    let mut reader = Reader::new(buffer);
+    let count = 
+        if reader.has_some() { decode_size(&mut reader)? as usize }
+        else                 { 0 };
+    Some((count, reader))
+}
+
+
+
+struct TagDecoder<'val> {
+    remaining: usize,
+    reader: Reader<'val, u8>,
+}
+
+impl<'val> TagDecoder<'val> {
+    fn new(tags: &'val [u8]) -> Option<TagDecoder> {
+        let (remaining, reader) = decode_list(tags)?;
+        if reader.remaining() < 2*remaining {
+            return None;
+        }
+        Some(TagDecoder { remaining, reader })
+    }
+
+    fn check_error(&self) -> Result<(), ()> {
+        if self.remaining > 0 || self.reader.has_some() {
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+impl<'val> Iterator for TagDecoder<'val> {
+    type Item = (&'val [u8], DecodedValue<'val>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let symbol_size = decode_symbol_length(&mut self.reader)? as usize;
+            let symbol      = self.reader.next_n(symbol_size)?;
+            let value       = decode(&mut self.reader).ok()?;
+            self.remaining -= 1;
+            return Some((symbol, value))
+        }
+        None
+    }
+}
+
+
+struct ListDecoder<'val> {
+    remaining: usize,
+    reader: Reader<'val, u8>,
+}
+
+impl<'val> ListDecoder<'val> {
+    fn new(payload: &'val [u8]) -> Option<ListDecoder> {
+        let (remaining, reader) = decode_list(payload)?;
+        if reader.remaining() < remaining {
+            return None;
+        }
+        Some(ListDecoder { remaining, reader })
+    }
+
+    fn check_error(&self) -> Result<(), ()> {
+        if self.remaining > 0 || self.reader.has_some() {
+            return Err(());
+        }
+        Ok(())
+    }
+}
+
+impl<'val> Iterator for ListDecoder<'val> {
+    type Item = DecodedValue<'val>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining > 0 {
+            let value = decode(&mut self.reader).ok()?;
+            self.remaining -= 1;
+            return Some(value)
+        }
+        None
+    }
+}
+
 
 
 
@@ -464,36 +559,27 @@ fn _encode_json(encoder: &mut Encoder, value: &Value) {
 
 fn decode_json(buffer: &[u8]) -> Result<Value, ()> {
     let mut reader = Reader::new(buffer);
-    let value = _decode_json(&mut reader)?;
+    let value = _decode_json(&decode(&mut reader)?)?;
     if reader.has_some() {
         return Err(());
     }
     Ok(value)
 }
 
-fn _decode_json(reader: &mut Reader<u8>) -> Result<Value, ()> {
-    let value = decode(reader)?;
-
+fn _decode_json(value: &DecodedValue) -> Result<Value, ()> {
     use WireType::*;
     let result = match value.ty {
         Null => {
             if value.has_tags {
                 let mut map = serde_json::Map::new();
 
-                if value.tags.len() > 0 {
-                    let mut tags = Reader::new(&value.tags);
-
-                    let count = decode_size(&mut tags)? as usize;
-                    for _ in 0..count {
-                        let symbol_size = decode_symbol_length(&mut tags)? as usize;
-
-                        let symbol = Vec::from(tags.next_n(symbol_size).ok_or(())?);
-                        let symbol = std::string::String::from_utf8(symbol).ok().ok_or(())?;
-
-                        let value = _decode_json(&mut tags)?;
-                        map.insert(symbol, value);
-                    }
+                let mut tags = value.tags().ok_or(())?;
+                for (symbol, value) in &mut tags {
+                    let symbol = std::string::String::from_utf8(symbol.into()).ok().ok_or(())?;
+                    let value  = _decode_json(&value)?;
+                    map.insert(symbol, value);
                 }
+                tags.check_error()?;
 
                 Value::Object(map)
             }
@@ -536,29 +622,19 @@ fn _decode_json(reader: &mut Reader<u8>) -> Result<Value, ()> {
         },
 
         List => {
-            let mut payload = Reader::new(&value.payload);
+            let mut payload = ListDecoder::new(value.payload).ok_or(())?;
 
             let mut values = vec![];
-            if payload.has_some() {
-                let length = decode_size(&mut payload)? as usize;
-                values.reserve(length);
-                for _ in 0..length {
-                    values.push(_decode_json(&mut payload)?);
-                }
-                assert!(payload.empty());
+            values.reserve(payload.remaining);
+            for value in &mut payload {
+                values.push(_decode_json(&value)?);
             }
+            payload.check_error()?;
 
             Value::Array(values)
         },
 
-        Nat | Nat8 | Nat16 | Nat32 | Nat64 |
-        Int | Int8 | Int16 | Int32 | Int64 |
-        Float32 |
-        Decimal32 | Decimal64 |
-        Bytes | Symbol
-        => {
-            return Err(());
-        },
+        _ => { return Err(()); },
     };
 
     Ok(result)
