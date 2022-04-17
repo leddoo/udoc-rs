@@ -31,8 +31,8 @@ pub const WIRE_TYPE_MIN:  u8 =  1;
 pub const WIRE_TYPE_MAX:  u8 = 21;
 pub const WIRE_TYPE_MASK: u8 = 32 - 1;
 
-pub const WIRE_FLAG_SCHEMA_TYPE: u8 = 0x40;
-pub const WIRE_FLAG_TAGS:        u8 = 0x80;
+pub const WIRE_FLAG_KIND: u8 = 0x40;
+pub const WIRE_FLAG_TAGS: u8 = 0x80;
 
 
 pub fn encode_size(value: u64) -> ([u8; 8], usize) {

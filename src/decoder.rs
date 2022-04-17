@@ -70,10 +70,10 @@ pub fn decode_list(buffer: &[u8]) -> Result<(usize, Reader<u8>)> {
 #[allow(dead_code)]
 pub struct Value<'val> {
     pub ty: WireType,
-    pub has_schema_type: bool,
+    pub has_kind: bool,
     pub has_tags: bool,
 
-    pub schema_type: &'val [u8],
+    pub kind: &'val [u8],
     pub tags: &'val [u8],
     pub payload: Payload<'val>,
 }
@@ -89,17 +89,17 @@ pub fn decode_value<'rdr>(reader: &mut Reader<'rdr, u8>) -> Result<Value<'rdr>> 
         unsafe { std::mem::transmute(ty) }
     };
 
-    let has_schema_type = header & WIRE_FLAG_SCHEMA_TYPE != 0;
-    let has_tags        = header & WIRE_FLAG_TAGS != 0;
+    let has_kind = header & WIRE_FLAG_KIND != 0;
+    let has_tags = header & WIRE_FLAG_TAGS != 0;
 
     let mut result = Value {
-        ty, has_schema_type, has_tags,
-        schema_type: &reader.buffer[0..0],
+        ty, has_kind, has_tags,
+        kind: &reader.buffer[0..0],
         tags:        &reader.buffer[0..0],
         payload:     Payload::Null,
     };
 
-    if has_schema_type {
+    if has_kind {
         unimplemented!();
     }
 
