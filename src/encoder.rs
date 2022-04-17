@@ -1,11 +1,12 @@
 use slice_reader::Reader;
-use crate::common::*;
+use crate::utils::*;
 
 
 #[derive(Debug, Clone)]
 pub enum Error {
     SizeOverflow,
 }
+
 
 pub struct Encoder {
     buffer: Vec<u8>,
@@ -17,11 +18,6 @@ pub struct Encoder {
     size_max_bytes: usize,
     compress_sizes: bool,
     size_overflow: bool,
-}
-
-struct Sizer {
-    offset: usize,
-    size:   usize,
 }
 
 impl Encoder {
@@ -166,7 +162,6 @@ impl Encoder {
         }
     }
 
-    #[allow(dead_code)]
     pub fn build_append(&self, dest: &mut Vec<u8>) -> Result<(), Error> {
         assert!(self.sizers.len() == 1);
         if self.size_overflow {
@@ -187,5 +182,10 @@ impl Default for Encoder {
     fn default() -> Encoder {
         Encoder::new(8, true)
     }
+}
+
+struct Sizer {
+    offset: usize,
+    size:   usize,
 }
 

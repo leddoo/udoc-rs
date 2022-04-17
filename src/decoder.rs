@@ -1,5 +1,5 @@
 use slice_reader::Reader;
-use crate::common::*;
+use crate::{wire_type::*};
 
 
 #[derive(Debug, Clone)]
@@ -28,7 +28,7 @@ pub fn u64_to_usize(value: u64) -> Result<usize> {
 }
 
 pub fn decode_size(reader: &mut Reader<u8>) -> Result<u64> {
-    crate::common::decode_size(reader).ok_or(Error::InputExhausted)
+    crate::utils::decode_size(reader).ok_or(Error::InputExhausted)
 }
 
 pub fn decode_size_as_usize(reader: &mut Reader<u8>) -> Result<usize> {

@@ -7,5 +7,6 @@ edition = "2021"
 slice-reader = {version = "0.1.0", git = "https://github.com/leddoo/slice-reader"}
 serde_json = {version = "1.0", features = ["preserve_order"] }
 
-[profile.release]
-debug = true
+[lib]
+name = "udoc"
+path = "src/lib.rs"

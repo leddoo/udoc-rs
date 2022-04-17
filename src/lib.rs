@@ -1,14 +1,15 @@
-mod common;
-mod encoder;
-mod decoder;
+pub mod wire_type;
+pub mod utils;
+pub mod encoder;
+pub mod decoder;
 
-use slice_reader::*;
-use common::*;
+
+pub use wire_type::*;
+
+
+use slice_reader::{Reader};
 use encoder::{Encoder};
 use decoder::{decode_value, ListDecoder, TagSymbol};
-
-
-
 
 
 
@@ -217,7 +218,8 @@ fn bench<F: FnMut()>(name: &str, length: usize, mut f: F) {
     println!("{} {:.2}/s {:.2?} {:.2}MiB/s", name, iters_per_sec, dt/iters, mibs);
 }
 
-fn main() {
+
+pub fn main() {
     let example = include_bytes!("example.json");
     let sleep = include_bytes!("sleep.json");
     let twitter = include_bytes!("twitter.json");
