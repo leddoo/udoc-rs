@@ -55,8 +55,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "slice-reader"
+version = "0.1.0"
+source = "git+https://github.com/leddoo/slice-reader#cd932bef814789e4c4c75daf71f3c0a557427010"
+
+[[package]]
 name = "udoc-rs"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "slice-reader",
 ]

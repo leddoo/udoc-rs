@@ -1,4 +1,4 @@
-use crate::reader::Reader;
+use slice_reader::Reader;
 
 #[allow(dead_code)]
 #[repr(u8)]
@@ -7,20 +7,20 @@ pub enum WireType {
     Null        =  1,
     BoolFalse   =  2,
     BoolTrue    =  3,
-    Nat         =  4,
-    Nat8        =  5,
-    Nat16       =  6,
-    Nat32       =  7,
-    Nat64       =  8,
-    Int         =  9,
-    Int8        = 10,
-    Int16       = 11,
-    Int32       = 12,
-    Int64       = 13,
-    Float32     = 14,
-    Float64     = 15,
-    Decimal32   = 16,
-    Decimal64   = 17,
+    Nat8        =  4,
+    Nat16       =  5,
+    Nat32       =  6,
+    Nat64       =  7,
+    Int8        =  8,
+    Int16       =  9,
+    Int32       = 10,
+    Int64       = 11,
+    Float32     = 12,
+    Float64     = 13,
+    Decimal32   = 14,
+    Decimal64   = 15,
+    Nat         = 16,
+    Int         = 17,
     Bytes       = 18,
     String      = 19,
     Symbol      = 20,
@@ -50,7 +50,7 @@ pub fn encode_size(value: u64) -> ([u8; 8], usize) {
 }
 
 pub fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
-    let first = *reader.peek(0)?;
+    let first = *reader.peek()?;
     let value = match first & 0b11 {
         0b00 => reader.next_u8_le()? as u64,
         0b01 => reader.next_u16_le()? as u64,

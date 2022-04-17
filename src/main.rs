@@ -1,9 +1,8 @@
-mod reader;
 mod common;
 mod encoder;
 mod decoder;
 
-use reader::*;
+use slice_reader::*;
 use common::*;
 use encoder::{Encoder};
 use decoder::{decode_value, ListDecoder, TagSymbol};

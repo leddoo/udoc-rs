@@ -1,4 +1,4 @@
-use crate::reader::Reader;
+use slice_reader::Reader;
 use crate::common::*;
 
 
