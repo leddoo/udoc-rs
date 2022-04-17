@@ -1,7 +1,8 @@
+use byte_order::ByteOrder;
 use slice_reader::Reader;
 
 
-pub fn encode_size(value: u64) -> ([u8; 8], usize) {
+pub fn encode_size<B: ByteOrder>(value: u64) -> ([u8; 8], usize) {
     let bits = 64 - value.leading_zeros();
 
     let value = value << 2;
@@ -12,25 +13,25 @@ pub fn encode_size(value: u64) -> ([u8; 8], usize) {
         else if bits <= 64 - 2 { (value | 0b11, 8) }
         else { unreachable!() };
 
-    (value.to_le_bytes(), length)
+    (B::write_u64(value), length)
 }
 
-pub fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
+pub fn decode_size<B: ByteOrder>(reader: &mut Reader<u8>) -> Option<u64> {
     let first = *reader.peek()?;
     let value = match first & 0b11 {
-        0b00 => reader.next_u8_le()? as u64,
-        0b01 => reader.next_u16_le()? as u64,
-        0b10 => reader.next_u32_le()? as u64,
-        0b11 => reader.next_u64_le()?,
+        0b00 => reader.next_u8::<B>()? as u64,
+        0b01 => reader.next_u16::<B>()? as u64,
+        0b10 => reader.next_u32::<B>()? as u64,
+        0b11 => reader.next_u64::<B>()?,
         _    => unreachable!()
     };
     Some(value >> 2)
 }
 
-pub fn peek_decode_size(reader: &Reader<u8>) -> Option<(u64, usize)> {
+pub fn peek_decode_size<B: ByteOrder>(reader: &Reader<u8>) -> Option<(u64, usize)> {
     let mut reader = reader.clone();
     let old_cursor = reader.cursor;
-    let size = decode_size(&mut reader)?;
+    let size = decode_size::<B>(&mut reader)?;
     Some((size, reader.cursor - old_cursor))
 }
 

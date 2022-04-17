@@ -1,3 +1,4 @@
+use byte_order::aliases::{LE, NE};
 use slice_reader::Reader;
 use crate::utils::*;
 
@@ -52,12 +53,12 @@ impl Encoder {
     }
 
     pub fn append_size(&mut self, value: u64) {
-        let (bytes, length) = encode_size(value);
+        let (bytes, length) = encode_size::<LE>(value);
         self.append(&bytes[..length]);
     }
 
     pub fn append_symbol(&mut self, symbol: &[u8]) {
-        let (bytes, length) = encode_size((symbol.len() << 1 | 1) as u64);
+        let (bytes, length) = encode_size::<LE>((symbol.len() << 1 | 1) as u64);
         self.append(&bytes[..length]);
         self.append(symbol);
     }
@@ -70,7 +71,7 @@ impl Encoder {
 
         if self.compress_sizes {
             let delta = (offset - self.last_size_offset) as u64;
-            let (delta, length) = encode_size(delta);
+            let (delta, length) = encode_size::<NE>(delta);
             self.size_offsets.extend(&delta[..length]);
             self.last_size_offset = offset;
         }
@@ -80,7 +81,7 @@ impl Encoder {
         assert!(self.sizers.len() > 1);
         let sizer = self.sizers.pop().unwrap();
 
-        let (size, length) = encode_size(sizer.size as u64);
+        let (size, length) = encode_size::<LE>(sizer.size as u64);
         if length > self.size_max_bytes {
             self.size_overflow = true;
         }
@@ -119,7 +120,7 @@ impl Encoder {
 
         while buffer.has_some() {
             if offsets.has_some() {
-                let next_size = decode_size(&mut offsets).unwrap();
+                let next_size = decode_size::<NE>(&mut offsets).unwrap();
 
                 let mut next_size = next_size as usize;
                 if first {
@@ -134,7 +135,7 @@ impl Encoder {
 
                 dest.extend(buffer.next_n(next_size).unwrap());
 
-                let (_size, length) = peek_decode_size(&buffer).unwrap();
+                let (_size, length) = peek_decode_size::<LE>(&buffer).unwrap();
                 dest.extend(buffer.peek_n(length).unwrap());
                 buffer.next_n(self.size_max_bytes).unwrap();
             }
