@@ -1,4 +1,5 @@
 use slice_reader::Reader;
+use byte_order::aliases::LE;
 use crate::{wire_type::*};
 
 
@@ -160,8 +161,8 @@ pub fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Resu
         Int64     => { Payload::Int64(reader.next_i64_le().ok_or(Error::InputExhausted)?) },
         Float32   => { Payload::Float32(reader.next_f32_le().ok_or(Error::InputExhausted)?) },
         Float64   => { Payload::Float64(reader.next_f64_le().ok_or(Error::InputExhausted)?) },
-        Decimal32 => { Payload::Decimal32(reader.next_bytes_le::<4>().ok_or(Error::InputExhausted)?) },
-        Decimal64 => { Payload::Decimal64(reader.next_bytes_le::<8>().ok_or(Error::InputExhausted)?) },
+        Decimal32 => { Payload::Decimal32(reader.next_bytes_endian::<4, LE>().ok_or(Error::InputExhausted)?) },
+        Decimal64 => { Payload::Decimal64(reader.next_bytes_endian::<8, LE>().ok_or(Error::InputExhausted)?) },
         Nat    => { Payload::Nat(decode_var_bytes(reader)?) },
         Int    => { Payload::Int(decode_var_bytes(reader)?) },
         Bytes  => { Payload::Bytes(decode_var_bytes(reader)?) },

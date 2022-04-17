@@ -55,14 +55,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "simple-byte-order"
+version = "0.1.0"
+source = "git+https://github.com/leddoo/simple-byte-order#d283bd9bb4cefe682b1a5fb946f2796d0e804986"
+
+[[package]]
 name = "slice-reader"
 version = "0.1.0"
-source = "git+https://github.com/leddoo/slice-reader#cd932bef814789e4c4c75daf71f3c0a557427010"
+source = "git+https://github.com/leddoo/slice-reader#315fe3043678ca8d304aad401d7af59befa28ca3"
+dependencies = [
+ "simple-byte-order",
+]
 
 [[package]]
 name = "udoc-rs"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "simple-byte-order",
  "slice-reader",
 ]
