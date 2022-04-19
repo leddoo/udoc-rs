@@ -1,5 +1,4 @@
-use slice_reader::Reader;
-use byte_order::aliases::LE;
+use slice_reader::{Reader, byte_order::aliases::LE};
 use crate::{wire_type::*, utils::*};
 
 

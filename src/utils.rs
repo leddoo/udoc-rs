@@ -1,5 +1,4 @@
-use byte_order::ByteOrder;
-use slice_reader::Reader;
+use slice_reader::{Reader, byte_order::ByteOrder};
 
 
 pub fn encode_size<B: ByteOrder>(value: u64) -> ([u8; 8], usize) {
