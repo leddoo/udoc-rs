@@ -35,3 +35,12 @@ pub fn peek_decode_size<B: ByteOrder>(reader: &Reader<u8>) -> Option<(u64, usize
     Some((size, reader.cursor - old_cursor))
 }
 
+
+pub fn u64_to_usize(value: u64) -> Option<usize> {
+    value.try_into().ok()
+}
+
+pub fn decode_size_as_usize<B: ByteOrder>(reader: &mut Reader<u8>) -> Option<usize> {
+    u64_to_usize(decode_size::<B>(reader)?)
+}
+

@@ -30,3 +30,13 @@ pub const WIRE_TYPE_MASK: u8 = 32 - 1;
 
 pub const WIRE_FLAG_KIND: u8 = 0x40;
 pub const WIRE_FLAG_TAGS: u8 = 0x80;
+
+
+impl WireType {
+    pub fn from_u8(value: u8) -> Option<WireType> {
+        if value >= WIRE_TYPE_MIN && value <= WIRE_TYPE_MAX {
+            return unsafe { std::mem::transmute(value) };
+        }
+        None
+    }
+}

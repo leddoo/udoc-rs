@@ -1,105 +1,58 @@
 use slice_reader::Reader;
 use byte_order::aliases::LE;
-use crate::{wire_type::*};
+use crate::{wire_type::*, utils::*};
 
 
-pub fn u64_to_usize(value: u64) -> Option<usize> {
-    value.try_into().ok()
-}
-
-pub fn decode_size(reader: &mut Reader<u8>) -> Option<u64> {
-    crate::utils::decode_size::<LE>(reader)
-}
-
-pub fn decode_size_as_usize(reader: &mut Reader<u8>) -> Option<usize> {
-    u64_to_usize(decode_size(reader)?)
-}
-
-
-pub enum TagSymbol<'val> {
-    Bytes (&'val [u8]),
-}
-
-pub fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<TagSymbol<'val>> {
-    let size = decode_size(reader)?;
-    let (size, is_bytes) = (size >> 1, size & 1 != 0);
-    if is_bytes {
-        Some(TagSymbol::Bytes(reader.next_n(u64_to_usize(size)?)?))
-    }
-    else {
-        unimplemented!()
-    }
-}
-
-
-pub fn decode_var_bytes<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
-    let size = decode_size_as_usize(reader)?;
+pub fn decode_size_prefixed<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
+    let size = decode_size_as_usize::<LE>(reader)?;
     reader.next_n(size)
 }
 
-// sequence?
-pub fn decode_list(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
+pub fn decode_length_prefixed(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
     let mut reader = Reader::new(buffer);
-    let count =
-        if reader.has_some() { decode_size_as_usize(&mut reader)? }
+    let length =
+        if reader.has_some() { decode_size_as_usize::<LE>(&mut reader)? }
         else                 { 0 };
-    Some((count, reader))
+    Some((length, reader))
 }
 
 
 
-#[allow(dead_code)]
-pub struct Value<'val> {
-    pub ty: WireType,
-    pub has_kind: bool,
-    pub has_tags: bool,
-
-    pub kind: &'val [u8],
-    pub tags: &'val [u8],
-    pub payload: Payload<'val>,
+#[derive(Clone, Copy)]
+pub struct Header {
+    pub wire_type: WireType,
+    pub has_kind:  bool,
+    pub has_tags:  bool,
 }
 
-pub fn decode_value<'rdr>(reader: &mut Reader<'rdr, u8>) -> Option<Value<'rdr>> {
+pub fn decode_header(reader: &mut Reader<u8>) -> Option<Header> {
     let header = reader.next_u8_le()?;
+    Some(Header {
+        wire_type: WireType::from_u8(header & WIRE_TYPE_MASK)?,
+        has_kind: header & WIRE_FLAG_KIND != 0,
+        has_tags: header & WIRE_FLAG_TAGS != 0,
+    })
+}
 
-    let ty: WireType = {
-        let ty = header & WIRE_TYPE_MASK;
-        if !(ty >= WIRE_TYPE_MIN && ty <= WIRE_TYPE_MAX) {
-            return None;
-        }
-        unsafe { std::mem::transmute(ty) }
-    };
 
-    let has_kind = header & WIRE_FLAG_KIND != 0;
-    let has_tags = header & WIRE_FLAG_TAGS != 0;
-
-    let mut result = Value {
-        ty, has_kind, has_tags,
-        kind: &reader.buffer[0..0],
-        tags:        &reader.buffer[0..0],
-        payload:     Payload::Null,
-    };
-
+pub fn decode_kind<'val>(has_kind: bool, reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
     if has_kind {
-        unimplemented!();
+        unimplemented!()
     }
+    else {
+        Some(&reader.buffer[0..0])
+    }
+}
 
+
+pub fn decode_tags<'val>(has_tags: bool, reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
     if has_tags {
-        let size = decode_size_as_usize(reader)?;
-        result.tags = reader.next_n(size)?;
+        decode_size_prefixed(reader)
     }
-
-    result.payload = decode_payload(ty, reader)?;
-
-    Some(result)
-}
-
-impl<'val> Value<'val> {
-    pub fn tags(&self) -> Option<TagDecoder> {
-        TagDecoder::new(self.tags)
+    else {
+        Some(&reader.buffer[0..0])
     }
 }
-
 
 
 pub enum Payload<'val> {
@@ -120,7 +73,7 @@ pub enum Payload<'val> {
     Decimal32 ([u8; 4]),
     Decimal64 ([u8; 8]),
     Bytes     (&'val [u8]),
-    String    (&'val str ),
+    String    (&'val [u8]),
     Symbol    (&'val [u8]),
     List      (&'val [u8]),
 }
@@ -143,17 +96,52 @@ pub fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Opti
         Float64   => { Payload::Float64(reader.next_f64_le()?) },
         Decimal32 => { Payload::Decimal32(reader.next_bytes_endian::<4, LE>()?) },
         Decimal64 => { Payload::Decimal64(reader.next_bytes_endian::<8, LE>()?) },
-        Nat    => { Payload::Nat(decode_var_bytes(reader)?) },
-        Int    => { Payload::Int(decode_var_bytes(reader)?) },
-        Bytes  => { Payload::Bytes(decode_var_bytes(reader)?) },
-        Symbol => { Payload::Symbol(decode_var_bytes(reader)?) },
-        List   => { Payload::List(decode_var_bytes(reader)?) },
-        String => {
-            let bytes = decode_var_bytes(reader)?;
-            Payload::String(std::str::from_utf8(bytes).ok()?)
-        },
+        Nat       => { Payload::Nat(decode_size_prefixed(reader)?) },
+        Int       => { Payload::Int(decode_size_prefixed(reader)?) },
+        Bytes     => { Payload::Bytes(decode_size_prefixed(reader)?) },
+        String    => { Payload::String(decode_size_prefixed(reader)?) },
+        Symbol    => { Payload::Symbol(decode_size_prefixed(reader)?) },
+        List      => { Payload::List(decode_size_prefixed(reader)?) },
     })
 }
+
+
+pub struct Value<'val> {
+    pub header:  Header,
+    pub kind:    &'val [u8],
+    pub tags:    &'val [u8],
+    pub payload: Payload<'val>,
+}
+
+impl<'val> Value<'val> {
+    pub fn tags(&self) -> Option<TagDecoder> {
+        TagDecoder::new(self.tags)
+    }
+}
+
+pub fn decode_value<'rdr>(reader: &mut Reader<'rdr, u8>) -> Option<Value<'rdr>> {
+    let header = decode_header(reader)?;
+    Some(Value {
+        header,
+        kind:    decode_kind(header.has_kind, reader)?,
+        tags:    decode_tags(header.has_tags, reader)?,
+        payload: decode_payload(header.wire_type, reader)?,
+    })
+}
+
+
+
+pub fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
+    let size = decode_size::<LE>(reader)?;
+    let (size, is_bytes) = (size >> 1, size & 1 != 0);
+    if is_bytes {
+        Some(reader.next_n(u64_to_usize(size)?)?)
+    }
+    else {
+        unimplemented!()
+    }
+}
+
 
 
 
@@ -165,7 +153,7 @@ pub struct TagDecoder<'val> {
 
 impl<'val> TagDecoder<'val> {
     pub fn new(tags: &'val [u8]) -> Option<TagDecoder> {
-        let (remaining, reader) = decode_list(tags)?;
+        let (remaining, reader) = decode_length_prefixed(tags)?;
         if reader.remaining() < 2*remaining {
             return None;
         }
@@ -183,7 +171,7 @@ impl<'val> TagDecoder<'val> {
 }
 
 impl<'val> Iterator for TagDecoder<'val> {
-    type Item = (TagSymbol<'val>, Value<'val>);
+    type Item = (&'val [u8], Value<'val>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining > 0 {
@@ -214,7 +202,7 @@ pub struct ListDecoder<'val> {
 
 impl<'val> ListDecoder<'val> {
     pub fn new(payload: &'val [u8]) -> Option<ListDecoder> {
-        let (remaining, reader) = decode_list(payload)?;
+        let (remaining, reader) = decode_length_prefixed(payload)?;
         if reader.remaining() < remaining {
             return None;
         }

@@ -9,7 +9,7 @@ pub use wire_type::*;
 
 use slice_reader::{Reader};
 use encoder::{Encoder};
-use decoder::{decode_value, ListDecoder, TagSymbol};
+use decoder::{decode_value, ListDecoder};
 
 
 
@@ -23,7 +23,7 @@ fn validate(buffer: &[u8]) -> Result<(), ()> {
 }
 
 fn _validate(value: &decoder::Value) -> Result<(), ()> {
-    if value.has_tags {
+    if value.header.has_tags {
         let mut tags = value.tags().ok_or(())?;
         for (_symbol, value) in &mut tags {
             _validate(&value)?;
@@ -131,13 +131,12 @@ fn _decode_json(value: &decoder::Value) -> Option<Value> {
     use decoder::Payload::*;
     let result = match value.payload {
         Null => {
-            if value.has_tags {
+            if value.header.has_tags {
                 let mut map = serde_json::Map::new();
 
                 let mut tags = value.tags()?;
                 for (symbol, value) in &mut tags {
-                    let symbol = match symbol { TagSymbol::Bytes (symbol) => symbol, };
-                    let symbol = std::string::String::from_utf8(symbol.into()).ok()?;
+                    let symbol = std::str::from_utf8(symbol).ok()?.into();
                     let value = _decode_json(&value)?;
                     map.insert(symbol, value);
                 }
@@ -170,7 +169,7 @@ fn _decode_json(value: &decoder::Value) -> Option<Value> {
         },
 
         String (value) => {
-            Value::String(value.into())
+            Value::String(std::str::from_utf8(value).ok()?.into())
         },
 
         List (value) => {
