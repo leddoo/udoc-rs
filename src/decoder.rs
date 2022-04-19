@@ -17,6 +17,19 @@ pub fn decode_length_prefixed(buffer: &[u8]) -> Option<(usize, Reader<u8>)> {
 }
 
 
+pub fn decode_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
+    let size = decode_size::<LE>(reader)?;
+    let (size, is_bytes) = (size >> 1, size & 1 != 0);
+    if is_bytes {
+        reader.next_n(u64_to_usize(size)?)
+    }
+    else {
+        // reserved.
+        None
+    }
+}
+
+
 
 #[derive(Clone, Copy)]
 pub struct Header {
@@ -37,7 +50,7 @@ pub fn decode_header(reader: &mut Reader<u8>) -> Option<Header> {
 
 pub fn decode_kind<'val>(has_kind: bool, reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
     if has_kind {
-        unimplemented!()
+        decode_symbol(reader)
     }
     else {
         Some(&reader.buffer[0..0])
@@ -52,6 +65,10 @@ pub fn decode_tags<'val>(has_tags: bool, reader: &mut Reader<'val, u8>) -> Optio
     else {
         Some(&reader.buffer[0..0])
     }
+}
+
+pub fn decode_tag<'val>(reader: &mut Reader<'val, u8>) -> Option<(&'val [u8], Value<'val>)> {
+    Some((decode_symbol(reader)?, decode_value(reader)?))
 }
 
 
@@ -100,7 +117,7 @@ pub fn decode_payload<'val>(ty: WireType, reader: &mut Reader<'val, u8>) -> Opti
         Int       => { Payload::Int(decode_size_prefixed(reader)?) },
         Bytes     => { Payload::Bytes(decode_size_prefixed(reader)?) },
         String    => { Payload::String(decode_size_prefixed(reader)?) },
-        Symbol    => { Payload::Symbol(decode_size_prefixed(reader)?) },
+        Symbol    => { Payload::Symbol(decode_symbol(reader)?) },
         List      => { Payload::List(decode_size_prefixed(reader)?) },
     })
 }
@@ -127,19 +144,6 @@ pub fn decode_value<'rdr>(reader: &mut Reader<'rdr, u8>) -> Option<Value<'rdr>> 
         tags:    decode_tags(header.has_tags, reader)?,
         payload: decode_payload(header.wire_type, reader)?,
     })
-}
-
-
-
-pub fn decode_tag_symbol<'val>(reader: &mut Reader<'val, u8>) -> Option<&'val [u8]> {
-    let size = decode_size::<LE>(reader)?;
-    let (size, is_bytes) = (size >> 1, size & 1 != 0);
-    if is_bytes {
-        Some(reader.next_n(u64_to_usize(size)?)?)
-    }
-    else {
-        unimplemented!()
-    }
 }
 
 
@@ -175,18 +179,13 @@ impl<'val> Iterator for TagDecoder<'val> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining > 0 {
-            let symbol = match decode_tag_symbol(&mut self.reader) {
-                Some(symbol) => symbol,
-                None => { self.error = true; return None },
-            };
-
-            let value = match decode_value(&mut self.reader) {
-                Some(value) => value,
+            let result = match decode_tag(&mut self.reader) {
+                Some(result) => result,
                 None => { self.error = true; return None },
             };
 
             self.remaining -= 1;
-            return Some((symbol, value))
+            return Some(result)
         }
         None
     }
