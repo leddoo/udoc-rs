@@ -150,9 +150,8 @@ pub fn decode_value<'rdr>(reader: &mut Reader<'rdr, u8>) -> Option<Value<'rdr>> 
 
 
 pub struct TagDecoder<'val> {
-    remaining: usize,
-    reader: Reader<'val, u8>,
-    error: bool,
+    pub remaining: usize,
+    pub reader:    Reader<'val, u8>,
 }
 
 impl<'val> TagDecoder<'val> {
@@ -161,29 +160,24 @@ impl<'val> TagDecoder<'val> {
         if reader.remaining() < 2*remaining {
             return None;
         }
-        Some(TagDecoder { remaining, reader, error: false })
+        Some(TagDecoder { remaining, reader })
     }
 
     pub fn check_error(self) -> Result<(), ()> {
-        if self.error || self.remaining > 0 || self.reader.has_some() {
+        if self.remaining != 0 || self.reader.has_some() {
             return Err(());
         }
         Ok(())
     }
-
-    pub fn remaining(&self) -> usize { self.remaining }
 }
 
 impl<'val> Iterator for TagDecoder<'val> {
     type Item = (&'val [u8], Value<'val>);
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<(&'val [u8], Value<'val>)> {
         if self.remaining > 0 {
-            let result = match decode_tag(&mut self.reader) {
-                Some(result) => result,
-                None => { self.error = true; return None },
-            };
-
+            let result = decode_tag(&mut self.reader)?;
+            // remaining != 0 => error.
             self.remaining -= 1;
             return Some(result)
         }
@@ -192,44 +186,37 @@ impl<'val> Iterator for TagDecoder<'val> {
 }
 
 
-
 pub struct ListDecoder<'val> {
-    remaining: usize,
-    reader: Reader<'val, u8>,
-    error: bool,
+    pub remaining: usize,
+    pub reader:    Reader<'val, u8>,
 }
 
 impl<'val> ListDecoder<'val> {
     pub fn new(payload: &'val [u8]) -> Option<ListDecoder> {
         let (remaining, reader) = decode_length_prefixed(payload)?;
-        if reader.remaining() < remaining {
+        if reader.remaining() < 1*remaining {
             return None;
         }
-        Some(ListDecoder { remaining, reader, error: false })
+        Some(ListDecoder { remaining, reader })
     }
 
     pub fn check_error(self) -> Result<(), ()> {
-        if self.error || self.remaining > 0 || self.reader.has_some() {
+        if self.remaining != 0 || self.reader.has_some() {
             return Err(());
         }
         Ok(())
     }
-
-    pub fn remaining(&self) -> usize { self.remaining }
 }
 
 impl<'val> Iterator for ListDecoder<'val> {
     type Item = Value<'val>;
 
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next(&mut self) -> Option<Value<'val>> {
         if self.remaining > 0 {
-            let value = match decode_value(&mut self.reader) {
-                Some(value) => value,
-                None => { self.error = true; return None },
-            };
-
+            let result = decode_value(&mut self.reader)?;
+            // remaining != 0 => error.
             self.remaining -= 1;
-            return Some(value)
+            return Some(result)
         }
         None
     }
